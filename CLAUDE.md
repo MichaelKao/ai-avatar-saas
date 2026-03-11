@@ -91,6 +91,15 @@ WebSocket → 桌面 App
 桌面 App → VB-Cable (cpal) → 虛擬麥克風 → 視訊 App 收到 AI 語音
 ```
 
+## API Keys & Tokens（不要 commit 到公開 repo）
+| 用途 | Token | 說明 |
+|------|-------|------|
+| GitHub Classic Token | `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` | 用於 GitHub Release 上傳、API 操作 |
+| Anthropic API Key | 見 `services/gateway/.env` | Claude LLM |
+| RunPod SSH | `ssh oq00jb5vt1laws-644113af@ssh.runpod.io -i ~/.ssh/id_ed25519` | GPU 伺服器 SSH |
+
+> **注意**：如果 token 過期，到 GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token，勾 `repo` 權限。
+
 ## 修改流程
 1. 修改程式碼 → 跑對應測試 → 更新 CLAUDE.md → git add + commit + push
 2. Railway 自動部署，確認 /health 正常
