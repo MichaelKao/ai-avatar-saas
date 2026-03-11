@@ -1,7 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+type AppScreen = 'login' | 'setup' | 'main';
 type Status = 'idle' | 'connecting' | 'active';
 
 interface LogEntry {
@@ -10,14 +14,294 @@ interface LogEntry {
   timestamp: number;
 }
 
+// ---------------------------------------------------------------------------
+// Shared style helpers
+// ---------------------------------------------------------------------------
+const inputStyle = (dark: boolean): React.CSSProperties => ({
+  width: '100%',
+  padding: '10px 12px',
+  borderRadius: 8,
+  border: `1px solid ${dark ? '#334155' : '#cbd5e1'}`,
+  fontSize: 14,
+  boxSizing: 'border-box',
+  background: dark ? '#0f172a' : '#fff',
+  color: dark ? '#e2e8f0' : '#1e293b',
+  outline: 'none',
+  transition: 'border-color 0.2s',
+});
+
+const gradientBg = 'linear-gradient(135deg, #3b82f6, #8b5cf6)';
+
+// ---------------------------------------------------------------------------
+// SVG Icons (no emojis)
+// ---------------------------------------------------------------------------
+const IconGear = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="10" cy="10" r="3" />
+    <path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M3.4 3.4l1.4 1.4M15.2 15.2l1.4 1.4M3.4 16.6l1.4-1.4M15.2 4.8l1.4-1.4" />
+  </svg>
+);
+
+const IconUser = () => (
+  <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="24" cy="18" r="8" />
+    <path d="M8 42c0-8.8 7.2-16 16-16s16 7.2 16 16" />
+  </svg>
+);
+
+const IconCheck = ({ checked }: { checked: boolean }) => (
+  <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+    <rect x="1" y="1" width="20" height="20" rx="4" stroke={checked ? '#22c55e' : '#64748b'} strokeWidth="2" fill={checked ? '#22c55e' : 'none'} />
+    {checked && <polyline points="6,11 10,15 16,7" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />}
+  </svg>
+);
+
+const IconLogout = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 14H3a1 1 0 01-1-1V3a1 1 0 011-1h3M11 11l3-3-3-3M14 8H6" />
+  </svg>
+);
+
+// ---------------------------------------------------------------------------
+// LoginPage
+// ---------------------------------------------------------------------------
+function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: string) => void }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!email || !password) {
+      setError('請輸入電子郵件和密碼');
+      return;
+    }
+    setLoading(true);
+    try {
+      const resp = await fetch(`${apiUrl}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const body = await resp.json();
+      if (!resp.ok) {
+        throw new Error(body.error || body.message || '登入失敗，請確認帳號密碼');
+      }
+      const token = body.data?.token;
+      if (!token) throw new Error('伺服器回傳格式異常，未取得 token');
+      onLogin(token);
+    } catch (err: any) {
+      setError(err.message || '登入失敗');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      height: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#0f172a',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    }}>
+      <div style={{
+        width: 380,
+        padding: '40px 36px',
+        borderRadius: 16,
+        background: '#1e293b',
+        boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+      }}>
+        {/* Logo / Brand */}
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{
+            width: 72, height: 72, borderRadius: 36, margin: '0 auto 16px',
+            background: gradientBg,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <IconUser />
+          </div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#f1f5f9' }}>AI 數位分身</h1>
+          <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748b' }}>登入您的帳號以繼續</p>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 6 }}>
+              電子郵件
+            </label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              autoFocus
+              style={inputStyle(true)}
+            />
+          </div>
+
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 6 }}>
+              密碼
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              style={inputStyle(true)}
+            />
+          </div>
+
+          {error && (
+            <div style={{
+              marginBottom: 16, padding: '10px 14px', borderRadius: 8,
+              background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)',
+              color: '#fca5a5', fontSize: 13,
+            }}>
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              width: '100%',
+              padding: '12px 0',
+              borderRadius: 10,
+              border: 'none',
+              background: loading ? '#475569' : gradientBg,
+              color: '#fff',
+              fontSize: 16,
+              fontWeight: 700,
+              cursor: loading ? 'not-allowed' : 'pointer',
+              boxShadow: loading ? 'none' : '0 4px 15px rgba(59,130,246,0.4)',
+              transition: 'all 0.2s',
+            }}
+          >
+            {loading ? '登入中...' : '登入'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SetupPage (first-run checklist)
+// ---------------------------------------------------------------------------
+function SetupPage({ onDone }: { onDone: () => void }) {
+  const items = [
+    { label: '已登入', done: true, link: null },
+    { label: 'VB-Cable 虛擬麥克風', done: false, link: 'https://vb-audio.com/Cable/' },
+    { label: 'OBS Virtual Camera', done: false, link: 'https://obsproject.com/' },
+  ];
+
+  return (
+    <div style={{
+      height: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#0f172a',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      color: '#e2e8f0',
+    }}>
+      <div style={{
+        width: 440,
+        padding: '36px 32px',
+        borderRadius: 16,
+        background: '#1e293b',
+        boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+      }}>
+        <h2 style={{ margin: '0 0 6px', fontSize: 20, fontWeight: 700 }}>首次使用 — 環境設定</h2>
+        <p style={{ margin: '0 0 24px', fontSize: 13, color: '#64748b' }}>
+          請確認以下軟體已安裝，才能正常使用 AI 分身功能。
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 28 }}>
+          {items.map((item, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <IconCheck checked={item.done} />
+              <span style={{ flex: 1, fontSize: 14, color: item.done ? '#a7f3d0' : '#e2e8f0' }}>
+                {item.label}
+              </span>
+              {item.link && (
+                <a
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: '#60a5fa',
+                    textDecoration: 'none',
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    border: '1px solid #334155',
+                    transition: 'background 0.2s',
+                  }}
+                  onMouseOver={e => (e.currentTarget.style.background = '#334155')}
+                  onMouseOut={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  下載安裝
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          padding: '12px 16px', borderRadius: 8,
+          background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)',
+          marginBottom: 24, fontSize: 12, color: '#93c5fd', lineHeight: 1.7,
+        }}>
+          <b>視訊軟體設定提示：</b><br />
+          1. 麥克風選擇「CABLE Output (VB-Audio Virtual Cable)」<br />
+          2. 攝影機選擇「OBS Virtual Camera」
+        </div>
+
+        <button
+          onClick={onDone}
+          style={{
+            width: '100%',
+            padding: '12px 0',
+            borderRadius: 10,
+            border: 'none',
+            background: gradientBg,
+            color: '#fff',
+            fontSize: 15,
+            fontWeight: 700,
+            cursor: 'pointer',
+            boxShadow: '0 4px 15px rgba(59,130,246,0.4)',
+          }}
+        >
+          我已安裝完成，繼續
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main App
+// ---------------------------------------------------------------------------
 function App() {
-  // 設定（儲存在 localStorage）
+  // Auth state
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
+  const [setupDone, setSetupDone] = useState(() => localStorage.getItem('setupDone') === 'true');
+
+  // Settings (saved in localStorage)
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://ai-avatar-saas-production.up.railway.app');
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://oq00jb5vt1laws-8888.proxy.runpod.net');
-  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
   const [showSettings, setShowSettings] = useState(false);
 
+  // Runtime state
   const [status, setStatus] = useState<Status>('idle');
   const [sessionId, setSessionId] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -26,20 +310,37 @@ function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
-  // 儲存設定到 localStorage
+  // Determine current screen
+  const screen: AppScreen = !token ? 'login' : !setupDone ? 'setup' : 'main';
+
+  // -----------------------------------------------------------------------
+  // Persist settings
+  // -----------------------------------------------------------------------
   useEffect(() => {
     localStorage.setItem('apiUrl', apiUrl);
     localStorage.setItem('gpuUrl', gpuUrl);
-    localStorage.setItem('token', token);
     localStorage.setItem('mode', mode.toString());
-  }, [apiUrl, gpuUrl, token, mode]);
+  }, [apiUrl, gpuUrl, mode]);
 
-  // 自動滾動 log
+  useEffect(() => {
+    if (token) localStorage.setItem('token', token);
+    else localStorage.removeItem('token');
+  }, [token]);
+
+  useEffect(() => {
+    localStorage.setItem('setupDone', setupDone ? 'true' : 'false');
+  }, [setupDone]);
+
+  // -----------------------------------------------------------------------
+  // Auto-scroll logs
+  // -----------------------------------------------------------------------
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // 計時器
+  // -----------------------------------------------------------------------
+  // Timer
+  // -----------------------------------------------------------------------
   useEffect(() => {
     if (status === 'active') {
       const start = Date.now();
@@ -55,7 +356,9 @@ function App() {
     };
   }, [status]);
 
-  // 監聽事件
+  // -----------------------------------------------------------------------
+  // Tauri event listeners
+  // -----------------------------------------------------------------------
   useEffect(() => {
     const unlisten1 = listen<string>('ws-message', (event) => {
       try {
@@ -96,6 +399,9 @@ function App() {
     };
   }, []);
 
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
   const addLog = (type: LogEntry['type'], text: string) => {
     setLogs(prev => [...prev.slice(-100), { type, text, timestamp: Date.now() }]);
   };
@@ -113,20 +419,45 @@ function App() {
     return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
   };
 
-  // === 一鍵啟動 ===
-  const handleStart = async () => {
-    if (!token) {
-      setShowSettings(true);
-      return;
-    }
+  // -----------------------------------------------------------------------
+  // Auth actions
+  // -----------------------------------------------------------------------
+  const handleLogin = useCallback((newToken: string) => {
+    setToken(newToken);
+  }, []);
 
+  const handleLogout = useCallback(async () => {
+    // Stop everything first if active
+    if (status === 'active') {
+      try {
+        await invoke('stop_auto_mode');
+        await invoke('disconnect_session');
+      } catch (_) { /* ignore */ }
+    }
+    setToken('');
+    setStatus('idle');
+    setSessionId('');
+    setLogs([]);
+    setElapsed(0);
+    setShowSettings(false);
+    localStorage.removeItem('token');
+  }, [status]);
+
+  const handleSetupDone = useCallback(() => {
+    setSetupDone(true);
+  }, []);
+
+  // -----------------------------------------------------------------------
+  // Start / Stop
+  // -----------------------------------------------------------------------
+  const handleStart = async () => {
     setStatus('connecting');
     setLogs([]);
     setElapsed(0);
     addLog('system', '正在建立連線...');
 
     try {
-      // Step 1: 建立 Session
+      // Step 1: Create session
       addLog('system', '建立 AI 會議 Session...');
       const resp = await fetch(`${apiUrl}/api/v1/session/start`, {
         method: 'POST',
@@ -136,6 +467,12 @@ function App() {
         },
       });
       const data = await resp.json();
+
+      if (resp.status === 401 || resp.status === 403) {
+        addLog('system', 'Token 已過期，請重新登入');
+        handleLogout();
+        return;
+      }
       if (!resp.ok) throw new Error(data.error || '建立 Session 失敗');
 
       const sid = data.data?.sessionId || data.data?.id;
@@ -143,12 +480,12 @@ function App() {
       setSessionId(sid);
       addLog('system', `Session 已建立: ${sid.slice(0, 8)}...`);
 
-      // Step 2: 連接 WebSocket
+      // Step 2: Connect WebSocket
       addLog('system', '連接 WebSocket...');
       await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
       addLog('system', 'WebSocket 已連線');
 
-      // Step 3: 啟動自動模式（音訊擷取 + STT）
+      // Step 3: Start auto mode (audio capture + STT)
       addLog('system', '啟動音訊擷取 + 語音辨識...');
       await invoke('start_auto_mode', { app: null, gpuUrl, mode });
       addLog('system', '自動模式已啟動 — AI 分身就緒！');
@@ -160,13 +497,11 @@ function App() {
     }
   };
 
-  // === 一鍵停止 ===
   const handleStop = async () => {
     try {
       await invoke('stop_auto_mode');
       await invoke('disconnect_session');
 
-      // 結束 Session
       if (sessionId) {
         await fetch(`${apiUrl}/api/v1/session/${sessionId}/end`, {
           method: 'DELETE',
@@ -180,29 +515,59 @@ function App() {
     setStatus('idle');
   };
 
+  // -----------------------------------------------------------------------
+  // Render: Login
+  // -----------------------------------------------------------------------
+  if (screen === 'login') {
+    return <LoginPage apiUrl={apiUrl} onLogin={handleLogin} />;
+  }
+
+  // -----------------------------------------------------------------------
+  // Render: Setup checklist
+  // -----------------------------------------------------------------------
+  if (screen === 'setup') {
+    return <SetupPage onDone={handleSetupDone} />;
+  }
+
+  // -----------------------------------------------------------------------
+  // Render: Main screen
+  // -----------------------------------------------------------------------
+  const dark = status === 'active';
+
   return (
     <div style={{
-      height: '100vh', display: 'flex', flexDirection: 'column',
+      height: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      background: status === 'active' ? '#0f172a' : '#f8fafc',
-      color: status === 'active' ? '#e2e8f0' : '#1e293b',
+      background: dark ? '#0f172a' : '#f8fafc',
+      color: dark ? '#e2e8f0' : '#1e293b',
       transition: 'all 0.3s',
     }}>
-      {/* 隱藏音訊播放器 */}
+      {/* Hidden audio player */}
       <audio ref={audioRef} style={{ display: 'none' }} />
 
-      {/* 頂部列 */}
+      {/* Top bar */}
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
         padding: '12px 20px',
-        borderBottom: `1px solid ${status === 'active' ? '#334155' : '#e2e8f0'}`,
+        borderBottom: `1px solid ${dark ? '#334155' : '#e2e8f0'}`,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 20, fontWeight: 700 }}>AI 分身</span>
           <span style={{
-            fontSize: 11, padding: '3px 10px', borderRadius: 99, fontWeight: 600,
-            background: status === 'idle' ? '#f1f5f9' : status === 'connecting' ? '#fef3c7' : '#065f46',
-            color: status === 'idle' ? '#64748b' : status === 'connecting' ? '#92400e' : '#a7f3d0',
+            fontSize: 11,
+            padding: '3px 10px',
+            borderRadius: 99,
+            fontWeight: 600,
+            background: status === 'idle' ? (dark ? '#334155' : '#f1f5f9')
+              : status === 'connecting' ? '#fef3c7'
+              : '#065f46',
+            color: status === 'idle' ? '#64748b'
+              : status === 'connecting' ? '#92400e'
+              : '#a7f3d0',
           }}>
             {status === 'idle' ? '待機' : status === 'connecting' ? '啟動中' : '運行中'}
           </span>
@@ -213,96 +578,141 @@ function App() {
               {formatTime(elapsed)}
             </span>
           )}
-          <button onClick={() => setShowSettings(!showSettings)} style={{
-            background: 'none', border: 'none', cursor: 'pointer', fontSize: 20,
-            color: status === 'active' ? '#94a3b8' : '#64748b',
-          }}>
-            ⚙
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            title="設定"
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: dark ? '#94a3b8' : '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              padding: 4,
+            }}
+          >
+            <IconGear />
           </button>
         </div>
       </div>
 
-      {/* 設定面板 */}
+      {/* Settings panel */}
       {showSettings && (
         <div style={{
-          padding: 16, borderBottom: `1px solid ${status === 'active' ? '#334155' : '#e2e8f0'}`,
-          background: status === 'active' ? '#1e293b' : '#fff',
+          padding: 16,
+          borderBottom: `1px solid ${dark ? '#334155' : '#e2e8f0'}`,
+          background: dark ? '#1e293b' : '#fff',
         }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>API URL</label>
-              <input value={apiUrl} onChange={e => setApiUrl(e.target.value)}
-                style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
+              <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>API URL</label>
+              <input
+                value={apiUrl}
+                onChange={e => setApiUrl(e.target.value)}
+                style={inputStyle(dark)}
+              />
             </div>
             <div>
-              <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>GPU URL</label>
-              <input value={gpuUrl} onChange={e => setGpuUrl(e.target.value)}
-                style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
+              <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>GPU URL</label>
+              <input
+                value={gpuUrl}
+                onChange={e => setGpuUrl(e.target.value)}
+                style={inputStyle(dark)}
+              />
             </div>
           </div>
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>JWT Token</label>
-            <input value={token} onChange={e => setToken(e.target.value)} type="password"
-              placeholder="登入 Web 版後，從 DevTools → Local Storage 複製 token"
-              style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
+
+          {/* Mode selector */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
             {[
               { id: 1, name: 'Mode 1 提詞', color: '#3b82f6' },
               { id: 2, name: 'Mode 2 語音', color: '#8b5cf6' },
               { id: 3, name: 'Mode 3 完整', color: '#f97316' },
             ].map(m => (
               <button key={m.id} onClick={() => setMode(m.id)} style={{
-                flex: 1, padding: '6px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                flex: 1,
+                padding: '6px 0',
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
                 border: `2px solid ${mode === m.id ? m.color : '#cbd5e1'}`,
                 background: mode === m.id ? m.color : 'transparent',
-                color: mode === m.id ? '#fff' : (status === 'active' ? '#94a3b8' : '#64748b'),
+                color: mode === m.id ? '#fff' : (dark ? '#94a3b8' : '#64748b'),
               }}>
                 {m.name}
               </button>
             ))}
           </div>
+
+          {/* Logout */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              onClick={handleLogout}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: `1px solid ${dark ? '#475569' : '#e2e8f0'}`,
+                background: 'transparent',
+                color: '#ef4444',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'background 0.2s',
+              }}
+              onMouseOver={e => (e.currentTarget.style.background = dark ? '#1e293b' : '#fef2f2')}
+              onMouseOut={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <IconLogout />
+              登出
+            </button>
+          </div>
         </div>
       )}
 
-      {/* 主畫面 */}
+      {/* Main content area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-        {/* 待機畫面 */}
+        {/* Idle screen */}
         {status === 'idle' && !showSettings && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ textAlign: 'center', maxWidth: 400 }}>
+            <div style={{ textAlign: 'center', maxWidth: 400, padding: '0 20px' }}>
               <div style={{
-                width: 100, height: 100, borderRadius: 50, margin: '0 auto 20px',
-                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 48, color: '#fff',
+                width: 100,
+                height: 100,
+                borderRadius: 50,
+                margin: '0 auto 20px',
+                background: gradientBg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}>
-                🤖
+                <svg width="52" height="52" viewBox="0 0 52 52" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="14" y="6" width="24" height="32" rx="12" />
+                  <circle cx="26" cy="22" r="4" />
+                  <path d="M18 44h16" />
+                  <path d="M26 38v6" />
+                  <path d="M8 22a18 18 0 0036 0" />
+                </svg>
               </div>
               <h2 style={{ margin: '0 0 8px', fontSize: 24 }}>AI 數位分身</h2>
               <p style={{ margin: '0 0 24px', color: '#64748b', fontSize: 14, lineHeight: 1.6 }}>
                 一鍵啟動 AI 分身。接起 Zoom、Google Meet、Teams、LINE 任何視訊或通話，AI 會自動聽對方說話、用你的聲音和臉回應。
               </p>
 
-              <div style={{
-                background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8,
-                padding: 12, marginBottom: 20, textAlign: 'left',
-              }}>
-                <p style={{ margin: '0 0 6px', fontSize: 12, fontWeight: 700, color: '#0369a1' }}>首次使用請先設定：</p>
-                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: '#0369a1', lineHeight: 1.8 }}>
-                  <li>安裝 <b>VB-Cable</b>（虛擬麥克風）</li>
-                  <li>安裝 <b>OBS Virtual Camera</b>（虛擬攝影機）</li>
-                  <li>視訊軟體設定麥克風為「VB-Cable Output」</li>
-                  <li>視訊軟體設定攝影機為「OBS Virtual Camera」</li>
-                  <li>點右上 ⚙ 填入 Token</li>
-                </ol>
-              </div>
-
               <button onClick={handleStart} style={{
-                width: '100%', padding: '14px 0', borderRadius: 12, border: 'none',
-                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
-                color: '#fff', fontSize: 18, fontWeight: 700, cursor: 'pointer',
+                width: '100%',
+                padding: '14px 0',
+                borderRadius: 12,
+                border: 'none',
+                background: gradientBg,
+                color: '#fff',
+                fontSize: 18,
+                fontWeight: 700,
+                cursor: 'pointer',
                 boxShadow: '0 4px 15px rgba(59,130,246,0.4)',
               }}>
                 啟動分身
@@ -311,13 +721,17 @@ function App() {
           </div>
         )}
 
-        {/* 連線中 */}
+        {/* Connecting spinner */}
         {status === 'connecting' && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{
-                width: 60, height: 60, border: '3px solid #3b82f6', borderTopColor: 'transparent',
-                borderRadius: 30, margin: '0 auto 16px',
+                width: 60,
+                height: 60,
+                border: '3px solid #3b82f6',
+                borderTopColor: 'transparent',
+                borderRadius: 30,
+                margin: '0 auto 16px',
                 animation: 'spin 1s linear infinite',
               }} />
               <p style={{ color: '#64748b', fontSize: 16 }}>啟動 AI 分身中...</p>
@@ -326,23 +740,37 @@ function App() {
           </div>
         )}
 
-        {/* 運行中 — Log 畫面 */}
+        {/* Active: log view */}
         {status === 'active' && (
           <>
             <div style={{
-              flex: 1, overflow: 'auto', padding: '12px 16px',
-              fontSize: 13, lineHeight: 1.6,
+              flex: 1,
+              overflow: 'auto',
+              padding: '12px 16px',
+              fontSize: 13,
+              lineHeight: 1.6,
             }}>
               {logs.map((log, i) => (
                 <div key={i} style={{
-                  display: 'flex', gap: 8, marginBottom: 4,
+                  display: 'flex',
+                  gap: 8,
+                  marginBottom: 4,
                   opacity: log.type === 'system' ? 0.5 : 1,
                 }}>
-                  <span style={{ color: '#64748b', fontSize: 11, fontFamily: 'monospace', flexShrink: 0, marginTop: 2 }}>
+                  <span style={{
+                    color: '#64748b',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    flexShrink: 0,
+                    marginTop: 2,
+                  }}>
                     {formatLogTime(log.timestamp)}
                   </span>
                   <span style={{
-                    fontSize: 11, fontWeight: 700, flexShrink: 0, marginTop: 2,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    flexShrink: 0,
+                    marginTop: 2,
                     color: log.type === 'stt' ? '#38bdf8'
                       : log.type === 'ai-text' ? '#4ade80'
                       : log.type === 'ai-audio' ? '#c084fc'
@@ -361,17 +789,26 @@ function App() {
               <div ref={logsEndRef} />
             </div>
 
-            {/* 底部控制列 */}
+            {/* Bottom control bar */}
             <div style={{
-              padding: '10px 16px', borderTop: '1px solid #334155',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 16px',
+              borderTop: '1px solid #334155',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
             }}>
               <div style={{ fontSize: 12, color: '#64748b' }}>
                 Mode {mode} | Session: {sessionId.slice(0, 8)}...
               </div>
               <button onClick={handleStop} style={{
-                padding: '8px 24px', borderRadius: 8, border: 'none',
-                background: '#ef4444', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+                padding: '8px 24px',
+                borderRadius: 8,
+                border: 'none',
+                background: '#ef4444',
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: 600,
+                cursor: 'pointer',
               }}>
                 停止分身
               </button>

@@ -15,6 +15,8 @@ fn main() {
             get_status,
             start_auto_mode,
             stop_auto_mode,
+            check_virtual_devices,
+            list_audio_devices,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -114,6 +116,90 @@ async fn start_auto_mode(
 fn stop_auto_mode() -> Result<String, String> {
     audio_capture::stop_capture();
     Ok("自動模式已停止".to_string())
+}
+
+/// 檢查虛擬音訊裝置是否已安裝
+#[tauri::command]
+fn check_virtual_devices() -> Result<serde_json::Value, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+
+    let mut has_vb_cable = false;
+    let mut has_virtual_cam = false;
+    let mut output_devices: Vec<String> = Vec::new();
+    let mut input_devices: Vec<String> = Vec::new();
+
+    // Check output devices (for playing TTS audio to virtual mic)
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                output_devices.push(name.clone());
+                let lower = name.to_lowercase();
+                if lower.contains("cable") || lower.contains("vb-") || lower.contains("virtual") {
+                    has_vb_cable = true;
+                }
+            }
+        }
+    }
+
+    // Check input devices
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                input_devices.push(name.clone());
+            }
+        }
+    }
+
+    // Check for OBS Virtual Camera (check if OBS virtual cam DLL exists)
+    let obs_paths = [
+        r"C:\Program Files\obs-studio\bin\64bit\obs-virtualsource.dll",
+        r"C:\Program Files (x86)\obs-studio\bin\64bit\obs-virtualsource.dll",
+    ];
+    for path in &obs_paths {
+        if std::path::Path::new(path).exists() {
+            has_virtual_cam = true;
+            break;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "has_vb_cable": has_vb_cable,
+        "has_virtual_cam": has_virtual_cam,
+        "output_devices": output_devices,
+        "input_devices": input_devices,
+    }))
+}
+
+/// 設定音訊輸出裝置（用於將 TTS 音訊路由到 VB-Cable）
+#[tauri::command]
+fn list_audio_devices() -> Result<serde_json::Value, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+
+    let mut outputs = Vec::new();
+    let mut inputs = Vec::new();
+
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                outputs.push(name);
+            }
+        }
+    }
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                inputs.push(name);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "output_devices": outputs,
+        "input_devices": inputs,
+    }))
 }
 
 /// Calculate RMS of audio samples
