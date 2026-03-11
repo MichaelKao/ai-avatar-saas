@@ -57,11 +57,12 @@ func main() {
 	// 中間件
 	app.Use(recover.New())
 	app.Use(logger.New())
+	corsOrigins := getEnv("CORS_ORIGINS", "http://localhost:3000")
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     getEnv("CORS_ORIGINS", "http://localhost:3000"),
+		AllowOrigins:     corsOrigins,
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
-		AllowCredentials: true,
+		AllowCredentials: corsOrigins != "*",
 	}))
 
 	// 速率限制
