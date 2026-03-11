@@ -13,9 +13,11 @@ export default function SessionPage() {
     sessionId,
     status,
     startTime,
+    mode,
     setSession,
     setStatus,
     setStartTime,
+    setMode,
     clearSuggestions,
     reset,
   } = useSessionStore();
@@ -139,9 +141,49 @@ export default function SessionPage() {
               </svg>
             </div>
             <h3 className="text-xl font-bold mb-2">準備開始會議</h3>
-            <p className="text-gray-500 mb-6 max-w-md">
-              啟動 AI 分身會議後，系統會即時聆聽對話並提供智能建議。
+            <p className="text-gray-500 mb-4 max-w-md">
+              選擇模式後啟動 AI 分身會議。
             </p>
+
+            {/* 模式選擇 */}
+            <div className="grid grid-cols-3 gap-3 mb-6 max-w-lg mx-auto">
+              <button
+                onClick={() => setMode(1)}
+                className={`p-3 rounded-xl border-2 text-left transition-all ${
+                  mode === 1 ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <div className="font-bold text-sm mb-1">Mode 1</div>
+                <div className="text-xs text-gray-500">Prompt 提詞</div>
+                <div className="text-xs text-gray-400 mt-1">AI 建議文字</div>
+              </button>
+              <button
+                onClick={() => setMode(2)}
+                className={`p-3 rounded-xl border-2 text-left transition-all ${
+                  mode === 2 ? 'border-purple-600 bg-purple-50' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <div className="font-bold text-sm mb-1">Mode 2</div>
+                <div className="text-xs text-gray-500">Avatar 分身</div>
+                <div className="text-xs text-gray-400 mt-1">AI 自動回答</div>
+              </button>
+              <button
+                onClick={() => setMode(3)}
+                className={`p-3 rounded-xl border-2 text-left transition-all ${
+                  mode === 3 ? 'border-orange-600 bg-orange-50' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <div className="font-bold text-sm mb-1">Mode 3</div>
+                <div className="text-xs text-gray-500">Full 完整</div>
+                <div className="text-xs text-gray-400 mt-1">換臉+換聲+換背景</div>
+              </button>
+            </div>
+            {mode >= 2 && (
+              <p className="text-xs text-amber-600 bg-amber-50 px-4 py-2 rounded-lg mb-4 max-w-md mx-auto">
+                Mode {mode} 需要 GPU 服務 + 桌面應用程式（Tauri）才能運作
+              </p>
+            )}
+
             <button
               onClick={handleStart}
               disabled={startMutation.isPending}

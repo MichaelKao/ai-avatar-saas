@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -32,6 +33,7 @@ type TranscriptionMessage struct {
 	Text      string `json:"text"`
 	SessionID string `json:"session_id"`
 	Language  string `json:"language"`
+	Mode      int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
 }
 
 // AIServiceRequest 呼叫 AI 服務的請求
@@ -175,6 +177,13 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			personality.Language = "zh-TW"
 		}
 
+		// 取得用戶的 voice_id（Mode 2/3 用）
+		var voiceID string
+		h.db.Get(&voiceID,
+			`SELECT COALESCE(voice_model_id, '') FROM avatar_profiles WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
+			userID,
+		)
+
 		// 發送連線成功訊息
 		writeWSMessage(conn, WSMessage{
 			Type: "connected",
@@ -182,6 +191,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				"session_id": sessionID,
 				"user_id":    userID,
 				"llm_model":  personality.LLMModel,
+				"voice_id":   voiceID,
 			},
 		})
 
@@ -241,7 +251,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				continue
 			}
 
-			// 發送 AI 建議文字
+			// 發送 AI 建議文字（所有模式都有）
 			writeWSMessage(conn, WSMessage{
 				Type: "suggestion_text",
 				Data: fiber.Map{
@@ -249,6 +259,31 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					"session_id": sessionID,
 				},
 			})
+
+			// Mode 2/3: 呼叫 GPU 服務做 TTS 語音合成
+			if msg.Mode >= 2 && voiceID != "" {
+				writeWSMessage(conn, WSMessage{
+					Type: "tts_status",
+					Data: fiber.Map{"status": "generating"},
+				})
+
+				ttsURL, err := callGPUTTS(aiResponse.Text, voiceID)
+				if err != nil {
+					log.Printf("TTS 失敗: %v", err)
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_status",
+						Data: fiber.Map{"status": "error", "error": err.Error()},
+					})
+				} else {
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio",
+						Data: fiber.Map{
+							"audio_url":  ttsURL,
+							"session_id": sessionID,
+						},
+					})
+				}
+			}
 
 			// 更新回應計數
 			h.db.Exec(
@@ -265,6 +300,45 @@ func writeWSMessage(conn *websocket.Conn, msg WSMessage) {
 	if err := conn.WriteJSON(msg); err != nil {
 		log.Printf("WebSocket 寫入錯誤: %v", err)
 	}
+}
+
+// TTSResponse GPU TTS 回應
+type TTSResponse struct {
+	Data struct {
+		AudioURL string `json:"audio_url"`
+	} `json:"data"`
+}
+
+// callGPUTTS 呼叫 GPU 服務做語音合成
+func callGPUTTS(text, voiceID string) (string, error) {
+	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
+	if gpuServiceURL == "" {
+		gpuServiceURL = "http://localhost:8002"
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":     text,
+		"voice_id": voiceID,
+	})
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Post(
+		gpuServiceURL+"/api/v1/tts/synthesize",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("GPU TTS 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	// GPU 服務直接回傳音訊檔，回傳 URL 讓前端下載
+	return gpuServiceURL + "/api/v1/tts/synthesize", nil
 }
 
 // callAIService 呼叫 Python LLM 服務

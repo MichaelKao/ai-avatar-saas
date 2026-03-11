@@ -12,6 +12,7 @@ interface SessionState {
   wsConnected: boolean;
   suggestions: AiSuggestion[];
   startTime: number | null;
+  mode: 1 | 2 | 3;
 
   setSession: (sessionId: string) => void;
   setStatus: (status: SessionState['status']) => void;
@@ -19,6 +20,7 @@ interface SessionState {
   addSuggestion: (suggestion: AiSuggestion) => void;
   clearSuggestions: () => void;
   setStartTime: (time: number | null) => void;
+  setMode: (mode: 1 | 2 | 3) => void;
   reset: () => void;
 }
 
@@ -28,10 +30,12 @@ export const useSessionStore = create<SessionState>((set) => ({
   wsConnected: false,
   suggestions: [],
   startTime: null,
+  mode: 1,
 
   setSession: (sessionId) => set({ sessionId }),
   setStatus: (status) => set({ status }),
   setWsConnected: (connected) => set({ wsConnected: connected }),
+  setMode: (mode) => set({ mode }),
   addSuggestion: (suggestion) =>
     set((state) => ({
       suggestions: [...state.suggestions, suggestion],
@@ -45,5 +49,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       wsConnected: false,
       suggestions: [],
       startTime: null,
+      mode: 1,
     }),
 }));

@@ -15,11 +15,13 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [inputText, setInputText] = useState('');
+  const [isThinking, setIsThinking] = useState(false);
   const {
     wsConnected,
     setWsConnected,
     suggestions,
     addSuggestion,
+    mode,
   } = useSessionStore();
 
   const connect = useCallback(() => {
@@ -35,17 +37,33 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
 
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'suggestion' || data.type === 'ai_response') {
-          const suggestion: AiSuggestion = {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'suggestion_text' || msg.type === 'suggestion' || msg.type === 'ai_response') {
+          const text = msg.data?.text || msg.text || msg.content || JSON.stringify(msg.data);
+          addSuggestion({
             id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
-            text: data.text || data.content || data.message || JSON.stringify(data),
+            text,
             timestamp: Date.now(),
-          };
-          addSuggestion(suggestion);
+          });
+        } else if (msg.type === 'thinking_animation') {
+          setIsThinking(msg.data?.status === 'start');
+        } else if (msg.type === 'tts_audio') {
+          // Mode 2/3: 收到 TTS 語音
+          addSuggestion({
+            id: 'tts-' + Date.now(),
+            text: '[TTS 語音已生成]',
+            timestamp: Date.now(),
+          });
+        } else if (msg.type === 'connected') {
+          // 連線成功
+        } else if (msg.type === 'error') {
+          addSuggestion({
+            id: 'err-' + Date.now(),
+            text: `[錯誤] ${msg.data || '未知錯誤'}`,
+            timestamp: Date.now(),
+          });
         }
       } catch {
-        // 純文字訊息
         addSuggestion({
           id: Date.now().toString(),
           text: event.data,
@@ -92,8 +110,8 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
 
     wsRef.current.send(
       JSON.stringify({
-        type: 'transcript',
         text: inputText.trim(),
+        mode: mode,
       })
     );
     setInputText('');
@@ -103,7 +121,16 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
     <div className="bg-white rounded-xl shadow-sm border flex flex-col h-full">
       {/* 標題 & 連線狀態 */}
       <div className="flex items-center justify-between px-5 py-3 border-b">
-        <h3 className="font-bold text-sm">AI 即時建議</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="font-bold text-sm">AI 即時建議</h3>
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+            mode === 1 ? 'bg-blue-100 text-blue-700' :
+            mode === 2 ? 'bg-purple-100 text-purple-700' :
+            'bg-orange-100 text-orange-700'
+          }`}>
+            Mode {mode}
+          </span>
+        </div>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1.5 text-xs">
             <span
@@ -143,6 +170,16 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
               </p>
             </div>
           ))
+        )}
+        {isThinking && (
+          <div className="flex items-center gap-2 text-sm text-gray-400 py-2">
+            <div className="flex gap-1">
+              <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            AI 思考中...
+          </div>
         )}
         <div ref={messagesEndRef} />
       </div>
