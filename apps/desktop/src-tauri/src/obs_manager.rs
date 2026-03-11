@@ -228,6 +228,13 @@ pub fn configure_obs() -> Result<(), String> {
     let obs_dir = PathBuf::from(&appdata).join("obs-studio");
     std::fs::create_dir_all(&obs_dir).ok();
 
+    // 清除 ProgramData 舊設定（避免 OBS 遷移衝突彈窗）
+    let programdata_ini = PathBuf::from(r"C:\ProgramData\obs-studio\global.ini");
+    if programdata_ini.exists() {
+        let backup = programdata_ini.with_extension("ini.bak");
+        std::fs::rename(&programdata_ini, &backup).ok();
+    }
+
     // === 修補 global.ini ===
     let global_ini = obs_dir.join("global.ini");
     let content = std::fs::read_to_string(&global_ini).unwrap_or_default();
@@ -352,6 +359,16 @@ fn patch_ini(content: &str, patches: &[(&str, &[(&str, &str)])]) -> String {
 
 /// 以隱藏模式啟動 OBS（最小化到系統匣）
 pub fn launch_obs_hidden(exe_path: &Path) -> Result<u32, String> {
+    // 清除可能造成 "Unable to migrate global configuration" 錯誤的衝突設定
+    // OBS 偵測到 ProgramData 和 AppData 都有 global.ini 時會彈出遷移對話框
+    let programdata_obs = PathBuf::from(r"C:\ProgramData\obs-studio");
+    let programdata_ini = programdata_obs.join("global.ini");
+    if programdata_ini.exists() {
+        // 備份後移除，讓 OBS 只用 %APPDATA% 路徑
+        let backup = programdata_obs.join("global.ini.bak");
+        std::fs::rename(&programdata_ini, &backup).ok();
+    }
+
     let child = std::process::Command::new(exe_path)
         .args([
             "--minimize-to-tray",
