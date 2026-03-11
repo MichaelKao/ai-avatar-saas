@@ -222,6 +222,29 @@ pub async fn install_obs_silent(
 // 設定
 // -------------------------------------------------------------------------
 
+/// 清除 ProgramData 下的 OBS 舊設定（避免遷移衝突彈窗）
+fn cleanup_programdata_obs() {
+    let programdata_obs = PathBuf::from(r"C:\ProgramData\obs-studio");
+    if !programdata_obs.exists() {
+        return;
+    }
+
+    // 移除 global.ini（造成 "Unable to migrate global configuration" 的根源）
+    let global_ini = programdata_obs.join("global.ini");
+    if global_ini.exists() {
+        std::fs::remove_file(&global_ini).ok();
+    }
+
+    // 也清除備份檔，避免殘留
+    let global_bak = programdata_obs.join("global.ini.bak");
+    if global_bak.exists() {
+        std::fs::remove_file(&global_bak).ok();
+    }
+
+    // 嘗試移除整個目錄（如果空的話）
+    std::fs::remove_dir(&programdata_obs).ok();
+}
+
 /// 設定 OBS：啟用 WebSocket、停用認證、啟用系統匣、抑制首次精靈
 pub fn configure_obs() -> Result<(), String> {
     let appdata = std::env::var("APPDATA").map_err(|_| "無法取得 APPDATA 路徑")?;
@@ -229,11 +252,7 @@ pub fn configure_obs() -> Result<(), String> {
     std::fs::create_dir_all(&obs_dir).ok();
 
     // 清除 ProgramData 舊設定（避免 OBS 遷移衝突彈窗）
-    let programdata_ini = PathBuf::from(r"C:\ProgramData\obs-studio\global.ini");
-    if programdata_ini.exists() {
-        let backup = programdata_ini.with_extension("ini.bak");
-        std::fs::rename(&programdata_ini, &backup).ok();
-    }
+    cleanup_programdata_obs();
 
     // === 修補 global.ini ===
     let global_ini = obs_dir.join("global.ini");
@@ -359,17 +378,18 @@ fn patch_ini(content: &str, patches: &[(&str, &[(&str, &str)])]) -> String {
 
 /// 以隱藏模式啟動 OBS（最小化到系統匣）
 pub fn launch_obs_hidden(exe_path: &Path) -> Result<u32, String> {
-    // 清除可能造成 "Unable to migrate global configuration" 錯誤的衝突設定
-    // OBS 偵測到 ProgramData 和 AppData 都有 global.ini 時會彈出遷移對話框
-    let programdata_obs = PathBuf::from(r"C:\ProgramData\obs-studio");
-    let programdata_ini = programdata_obs.join("global.ini");
-    if programdata_ini.exists() {
-        // 備份後移除，讓 OBS 只用 %APPDATA% 路徑
-        let backup = programdata_obs.join("global.ini.bak");
-        std::fs::rename(&programdata_ini, &backup).ok();
-    }
+    // 清除 ProgramData 舊設定（避免 "Unable to migrate global configuration" 彈窗）
+    // OBS 偵測到 ProgramData 和 AppData 都有設定時會顯示遷移衝突對話框
+    cleanup_programdata_obs();
+
+    // 取得 OBS 執行檔所在目錄，作為工作目錄
+    // OBS 需要在自己的目錄下才能找到 locale/en-US.ini 等相對路徑資源
+    let obs_dir = exe_path
+        .parent()
+        .ok_or("無法取得 OBS 目錄路徑")?;
 
     let child = std::process::Command::new(exe_path)
+        .current_dir(obs_dir)
         .args([
             "--minimize-to-tray",
             "--startvirtualcam",
