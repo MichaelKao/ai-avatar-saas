@@ -42,7 +42,7 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
         let mut skipped: usize = 0;
 
         let tx_clone = tx.clone();
-        let stream = device.build_input_stream(
+        let stream = match device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if !CAPTURING.load(Ordering::SeqCst) {
@@ -66,7 +66,7 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
 
                 buffer.extend_from_slice(&mono);
 
-                // Send chunk every ~3 seconds
+                // Send chunk every 1.5 seconds
                 if buffer.len() >= chunk_size {
                     // Resample to 16kHz if needed
                     let resampled = if sample_rate != 16000 {
@@ -92,14 +92,27 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
                 eprintln!("音訊擷取錯誤: {}", err);
             },
             None,
-        ).ok();
-
-        if let Some(stream) = stream {
-            let _ = stream.play();
-            // Keep thread alive while capturing
-            while CAPTURING.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("建立音訊串流失敗: {}", e);
+                CAPTURING.store(false, Ordering::SeqCst);
+                return;
             }
+        };
+
+        match stream.play() {
+            Ok(_) => eprintln!("音訊擷取已啟動: {}Hz {}ch", sample_rate, channels),
+            Err(e) => {
+                eprintln!("啟動音訊串流失敗: {}", e);
+                CAPTURING.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+
+        // Keep thread alive while capturing
+        while CAPTURING.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
 
