@@ -348,9 +348,17 @@ function App() {
         } else if (msg.type === 'tts_audio') {
           const audioUrl = msg.data?.audio_url || '';
           addLog('ai-audio', '語音回覆已產生');
-          if (audioUrl && audioRef.current) {
-            audioRef.current.src = audioUrl;
-            audioRef.current.play().catch(() => {});
+          if (audioUrl) {
+            // Play TTS audio to VB-Cable so video call apps hear it
+            invoke('play_audio_to_vbcable', { audioUrl }).then(() => {
+              addLog('ai-audio', '語音已送出到虛擬麥克風');
+            }).catch(() => {
+              // Fallback: play through speakers
+              if (audioRef.current) {
+                audioRef.current.src = audioUrl;
+                audioRef.current.play().catch(() => {});
+              }
+            });
           }
         } else if (msg.type === 'avatar_video') {
           addLog('ai-video', msg.data?.video_url || '');

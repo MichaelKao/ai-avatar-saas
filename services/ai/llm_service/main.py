@@ -157,6 +157,42 @@ async def list_models():
     }
 
 
+class GenerateRequest(BaseModel):
+    """Gateway 呼叫的生成請求（相容 /api/v1/generate）"""
+    text: str
+    session_id: str = ""
+    user_id: str = ""
+    system_prompt: str = "你是一位專業的商業顧問，回答簡潔有力，使用繁體中文。"
+    llm_model: str = "claude-sonnet-4-20250514"
+    temperature: float = 0.7
+    language: str = "zh-TW"
+
+
+@app.post("/api/v1/generate")
+async def generate(request: GenerateRequest):
+    """Gateway 呼叫的端點 — 接收文字、回傳 AI 回覆"""
+    handler = _get_handler(request.llm_model)
+
+    messages = [{"role": "user", "content": request.text}]
+    try:
+        result = await handler.chat(
+            model=request.llm_model,
+            system_prompt=request.system_prompt,
+            messages=messages,
+            temperature=request.temperature,
+        )
+        return {
+            "text": result.get("text", result.get("content", "")),
+            "session_id": request.session_id,
+        }
+    except RuntimeError as e:
+        logger.warning("生成失敗（設定問題）: %s", str(e))
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error("生成失敗: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"生成失敗: {str(e)}")
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """處理對話請求（非串流）"""

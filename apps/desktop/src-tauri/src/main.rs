@@ -22,6 +22,7 @@ fn main() {
             api_end_session,
             install_vb_cable,
             auto_setup,
+            play_audio_to_vbcable,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -386,6 +387,115 @@ async fn auto_setup(app: tauri::AppHandle) -> Result<serde_json::Value, String> 
             }))
         }
     }
+}
+
+/// 下載 TTS 音訊並播放到 VB-Cable（讓視訊軟體的麥克風收到 AI 語音）
+#[tauri::command]
+async fn play_audio_to_vbcable(audio_url: String) -> Result<String, String> {
+    // Step 1: Download WAV
+    let client = reqwest::Client::new();
+    let resp = client.get(&audio_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await
+        .map_err(|e| format!("下載音訊失敗: {}", e))?;
+    let wav_bytes = resp.bytes().await
+        .map_err(|e| format!("讀取音訊失敗: {}", e))?;
+
+    // Step 2+3+4+5: Decode + Play in blocking thread (cpal::Stream is !Send)
+    let result = tokio::task::spawn_blocking(move || {
+        play_wav_to_vbcable_sync(&wav_bytes)
+    }).await.map_err(|e| format!("執行緒錯誤: {}", e))?;
+
+    result
+}
+
+/// Synchronous WAV playback to VB-Cable device
+fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    // Decode WAV
+    let cursor = std::io::Cursor::new(wav_bytes);
+    let mut reader = hound::WavReader::new(cursor)
+        .map_err(|e| format!("解析 WAV 失敗: {}", e))?;
+    let spec = reader.spec();
+    let samples: Vec<i16> = if spec.bits_per_sample == 16 {
+        reader.samples::<i16>().filter_map(|s| s.ok()).collect()
+    } else {
+        reader.samples::<i32>().filter_map(|s| s.ok())
+            .map(|s| (s >> 16) as i16).collect()
+    };
+
+    if samples.is_empty() {
+        return Err("音訊資料為空".to_string());
+    }
+
+    // Find VB-Cable output device
+    let host = cpal::default_host();
+    let vb_device = host.output_devices()
+        .map_err(|e| format!("列舉裝置失敗: {}", e))?
+        .find(|d| {
+            d.name().map(|n| {
+                let lower = n.to_lowercase();
+                lower.contains("cable") && lower.contains("input")
+            }).unwrap_or(false)
+        })
+        .ok_or_else(|| "找不到 VB-Cable Input 裝置，請先安裝 VB-Cable".to_string())?;
+
+    let device_name = vb_device.name().unwrap_or_default();
+
+    // Configure stream
+    let sample_rate = spec.sample_rate;
+    let channels = spec.channels as usize;
+    let config = cpal::StreamConfig {
+        channels: channels as u16,
+        sample_rate: cpal::SampleRate(sample_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    // Play audio
+    let samples = std::sync::Arc::new(samples);
+    let pos = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let samples_clone = samples.clone();
+    let pos_clone = pos.clone();
+    let done_clone = done.clone();
+
+    let stream = vb_device.build_output_stream(
+        &config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let total = samples_clone.len();
+            for frame in data.chunks_mut(channels) {
+                let idx = pos_clone.load(std::sync::atomic::Ordering::Relaxed);
+                if idx >= total {
+                    for s in frame.iter_mut() { *s = 0.0; }
+                    done_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    for (ch, s) in frame.iter_mut().enumerate() {
+                        let sample_idx = idx + ch;
+                        if sample_idx < total {
+                            *s = samples_clone[sample_idx] as f32 / 32768.0;
+                        } else {
+                            *s = 0.0;
+                        }
+                    }
+                    pos_clone.fetch_add(channels, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        },
+        |e| eprintln!("音訊串流錯誤: {}", e),
+        None,
+    ).map_err(|e| format!("建立音訊串流失敗: {}", e))?;
+
+    stream.play().map_err(|e| format!("播放失敗: {}", e))?;
+
+    // Wait for playback to finish
+    let duration_secs = samples.len() as f64 / (sample_rate as f64 * channels as f64);
+    let wait_ms = (duration_secs * 1000.0) as u64 + 500;
+    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+
+    drop(stream);
+    Ok(format!("已播放到 {}", device_name))
 }
 
 /// Calculate RMS of audio samples
