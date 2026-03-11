@@ -13,7 +13,10 @@ pub async fn transcribe(audio_data: &[i16], sample_rate: u32, gpu_url: &str) -> 
         .mime_str("audio/wav")
         .map_err(|e| format!("MIME error: {}", e))?;
 
-    let form = multipart::Form::new().part("audio", part);
+    // 指定語言為中文，避免 Whisper 自動偵測把中文聽成英文/日文
+    let form = multipart::Form::new()
+        .part("audio", part)
+        .text("language", "zh");
 
     let resp = client
         .post(format!("{}/api/v1/stt/transcribe", gpu_url))

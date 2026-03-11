@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile, os, logging
 
@@ -31,7 +31,8 @@ def health():
 
 
 @app.post("/api/v1/stt/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+async def transcribe(audio: UploadFile = File(...), language: str = Form("zh")):
+    """語音轉文字 — 預設中文，避免 Whisper 自動偵測錯誤"""
     if not whisper_model:
         return {"data": {"text": ""}, "error": "model not loaded"}
     suffix = os.path.splitext(audio.filename or ".wav")[1]
@@ -39,7 +40,8 @@ async def transcribe(audio: UploadFile = File(...)):
         tmp.write(await audio.read())
         tmp_path = tmp.name
     try:
-        segments, info = whisper_model.transcribe(tmp_path)
+        # 指定語言避免自動偵測把中文辨識成英文/日文
+        segments, info = whisper_model.transcribe(tmp_path, language=language)
         text = " ".join(seg.text for seg in segments).strip()
         return {"data": {"text": text, "language": info.language}}
     finally:
