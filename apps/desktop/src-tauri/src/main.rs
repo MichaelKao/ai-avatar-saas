@@ -35,6 +35,8 @@ fn main() {
             set_voice_and_face,
             auto_set_default_mic,
             restore_default_mic,
+            auto_disable_real_cameras,
+            restore_real_cameras,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -699,6 +701,78 @@ async fn restore_default_mic() -> Result<String, String> {
     } else {
         Ok("無需還原".to_string())
     }
+}
+
+/// 自動停用真實攝影機，讓所有 APP 只看到 OBS Virtual Camera
+#[tauri::command]
+async fn auto_disable_real_cameras() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+
+    let script = include_str!("set_default_cam.ps1");
+    let script_path = std::env::temp_dir().join("ai-avatar-set-cam.ps1");
+    std::fs::write(&script_path, script)
+        .map_err(|e| format!("寫入腳本失敗: {}", e))?;
+
+    // 需要管理員權限（Disable-PnpDevice 需要）
+    let ps_cmd = format!(
+        "Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}','-Action','set' -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode",
+        script_path.to_str().unwrap_or("")
+    );
+
+    let output: std::process::Output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .creation_flags(0x08000000)
+            .output()
+    }).await
+        .map_err(|e| format!("執行緒錯誤: {}", e))?
+        .map_err(|e| format!("執行 PowerShell 失敗: {}", e))?;
+
+    // 檢查儲存檔是否已建立（表示有停用攝影機）
+    let save_file = std::env::temp_dir().join("ai-avatar-disabled-cams.txt");
+    if save_file.exists() {
+        Ok("已停用真實攝影機，所有 APP 只會看到 OBS Virtual Camera".to_string())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if stdout.contains("NO_REAL_CAM") {
+            Ok("沒有偵測到真實攝影機，無需停用".to_string())
+        } else {
+            Ok("攝影機設定完成".to_string())
+        }
+    }
+}
+
+/// 還原被停用的真實攝影機
+#[tauri::command]
+async fn restore_real_cameras() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+
+    let script_path = std::env::temp_dir().join("ai-avatar-set-cam.ps1");
+    if !script_path.exists() {
+        let script = include_str!("set_default_cam.ps1");
+        std::fs::write(&script_path, script).ok();
+    }
+
+    let save_file = std::env::temp_dir().join("ai-avatar-disabled-cams.txt");
+    if !save_file.exists() {
+        return Ok("無需還原攝影機".to_string());
+    }
+
+    let ps_cmd = format!(
+        "Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}','-Action','restore' -Verb RunAs -Wait",
+        script_path.to_str().unwrap_or("")
+    );
+
+    let _output: std::process::Output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .creation_flags(0x08000000)
+            .output()
+    }).await
+        .map_err(|e| format!("執行緒錯誤: {}", e))?
+        .map_err(|e| format!("還原攝影機失敗: {}", e))?;
+
+    Ok("已還原真實攝影機".to_string())
 }
 
 /// Calculate RMS of audio samples

@@ -222,27 +222,15 @@ pub async fn install_obs_silent(
 // 設定
 // -------------------------------------------------------------------------
 
-/// 清除 ProgramData 下的 OBS 舊設定（避免遷移衝突彈窗）
+/// 清除 OBS 舊設定（避免 "Unable to migrate global configuration" 遷移衝突彈窗）
+/// OBS 發現 ProgramData 和 AppData 都有 global.ini 時就會彈出此錯誤
+/// 解法：直接刪除 ProgramData 下的整個 obs-studio 目錄
 fn cleanup_programdata_obs() {
     let programdata_obs = PathBuf::from(r"C:\ProgramData\obs-studio");
-    if !programdata_obs.exists() {
-        return;
+    if programdata_obs.exists() {
+        // 整個目錄刪掉（不只是 global.ini）
+        std::fs::remove_dir_all(&programdata_obs).ok();
     }
-
-    // 移除 global.ini（造成 "Unable to migrate global configuration" 的根源）
-    let global_ini = programdata_obs.join("global.ini");
-    if global_ini.exists() {
-        std::fs::remove_file(&global_ini).ok();
-    }
-
-    // 也清除備份檔，避免殘留
-    let global_bak = programdata_obs.join("global.ini.bak");
-    if global_bak.exists() {
-        std::fs::remove_file(&global_bak).ok();
-    }
-
-    // 嘗試移除整個目錄（如果空的話）
-    std::fs::remove_dir(&programdata_obs).ok();
 }
 
 /// 設定 OBS：啟用 WebSocket、停用認證、啟用系統匣、抑制首次精靈

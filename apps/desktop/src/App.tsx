@@ -598,6 +598,14 @@ function MainApp() {
         }
       }
 
+      // 自動停用真實攝影機，讓 LINE/Zoom/Teams/Meet 只看到 OBS Virtual Camera
+      try {
+        const camResult: string = await invoke('auto_disable_real_cameras');
+        addLog('system', camResult);
+      } catch (err: any) {
+        addLog('system', `攝影機設定: ${err}`);
+      }
+
       // Mode 2/3：擷取 webcam 截圖 + 設定聲音性別
       let faceBase64 = '';
       if (mode >= 2) {
@@ -670,8 +678,9 @@ function MainApp() {
       invoke('close_avatar_window').catch(() => {});
       // 自動清理 OBS（停止虛擬鏡頭 + 關閉 OBS）
       invoke('cleanup_obs').catch(() => {});
-      // 還原 Windows 預設麥克風
+      // 還原 Windows 預設麥克風和攝影機
       invoke('restore_default_mic').catch(() => {});
+      invoke('restore_real_cameras').catch(() => {});
 
       if (sessionId) {
         await invoke('api_end_session', { apiUrl, token, sessionId }).catch(() => {});
