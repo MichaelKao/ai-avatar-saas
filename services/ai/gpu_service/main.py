@@ -12,7 +12,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import httpx
 import torch
 
 logging.basicConfig(level=logging.INFO)
@@ -115,18 +117,18 @@ async def clone_voice(voice_sample: UploadFile = File(...)):
 
 @app.post("/api/v1/tts/synthesize")
 async def synthesize_speech(request: TTSRequest):
-    """文字 → 語音（使用克隆的聲音或預設聲音）"""
+    """文字 → 語音（使用克隆的聲音或預設聲音），回傳可下載的音訊 URL"""
     if cosyvoice_model is None:
         raise HTTPException(503, "CosyVoice 模型未載入")
 
     try:
-        output_path = OUTPUT_DIR / f"tts_{uuid.uuid4()}.wav"
+        filename = f"tts_{uuid.uuid4()}.wav"
+        output_path = OUTPUT_DIR / filename
         if request.voice_id == "default":
-            # 使用內建預設聲音，不需要克隆的聲音檔案
             cosyvoice_model.synthesize_default(request.text, str(output_path))
         else:
             cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
-        return FileResponse(str(output_path), media_type="audio/wav")
+        return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
     except Exception as e:
         raise HTTPException(500, f"語音合成失敗: {str(e)}")
 
@@ -204,6 +206,78 @@ async def generate_avatar_stream(
     return StreamingResponse(generate(), media_type="application/octet-stream")
 
 
+# ============== Mode 3: 合併 TTS + 臉部動畫 ==============
+
+class TalkingAvatarRequest(BaseModel):
+    text: str
+    voice_id: str = "default"
+    face_image_url: str = "default"  # "default" 或圖片 URL
+
+
+@app.post("/api/v1/avatar/generate-talking")
+async def generate_talking_avatar(request: TalkingAvatarRequest):
+    """Mode 3: 文字 → TTS 語音 → Wav2Lip 臉部動畫影片"""
+    if cosyvoice_model is None:
+        raise HTTPException(503, "CosyVoice 模型未載入")
+
+    req_id = str(uuid.uuid4())
+
+    # Step 1: TTS 語音合成
+    audio_filename = f"tts_{req_id}.wav"
+    audio_path = OUTPUT_DIR / audio_filename
+    try:
+        if request.voice_id == "default":
+            cosyvoice_model.synthesize_default(request.text, str(audio_path))
+        else:
+            cosyvoice_model.synthesize(request.text, request.voice_id, str(audio_path))
+        logger.info(f"TTS 完成: {audio_filename}")
+    except Exception as e:
+        raise HTTPException(500, f"語音合成失敗: {str(e)}")
+
+    # Step 2: 取得臉部圖片
+    has_face = False
+    face_path = UPLOAD_DIR / f"face_{req_id}.jpg"
+
+    if request.face_image_url == "default":
+        # 檢查是否有預設臉部圖片
+        default_face = MODEL_DIR / "default_face.jpg"
+        if default_face.exists():
+            face_path = default_face
+            has_face = True
+        else:
+            logger.info("無預設臉部圖片，跳過 Wav2Lip，僅回傳音訊")
+    else:
+        # 從 URL 下載臉部圖片
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(request.face_image_url)
+                resp.raise_for_status()
+                with open(face_path, "wb") as f:
+                    f.write(resp.content)
+            has_face = True
+            logger.info(f"臉部圖片已下載: {face_path}")
+        except Exception as e:
+            logger.warning(f"下載臉部圖片失敗: {e}，僅回傳音訊")
+
+    # Step 3: Wav2Lip 臉部動畫（如果有臉部圖片且模型已載入）
+    video_filename = None
+    if has_face and wav2lip_model is not None:
+        video_filename = f"video_{req_id}.mp4"
+        video_path = OUTPUT_DIR / video_filename
+        try:
+            wav2lip_model.generate_video(str(face_path), str(audio_path), str(video_path))
+            logger.info(f"Wav2Lip 影片完成: {video_filename}")
+        except Exception as e:
+            logger.error(f"Wav2Lip 失敗: {e}")
+            video_filename = None
+
+    result = {"audio_url": f"/outputs/{audio_filename}"}
+    if video_filename:
+        result["video_url"] = f"/outputs/{video_filename}"
+
+    return {"data": result, "error": None}
+
+
 # ============== 模型管理 ==============
 
 @app.get("/api/v1/models/status")
@@ -212,7 +286,7 @@ async def models_status():
     gpu_mem = None
     if torch.cuda.is_available():
         gpu_mem = {
-            "total_gb": round(torch.cuda.get_device_properties(0).total_mem / 1e9, 1),
+            "total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1),
             "allocated_gb": round(torch.cuda.memory_allocated(0) / 1e9, 1),
             "cached_gb": round(torch.cuda.memory_reserved(0) / 1e9, 1),
         }
@@ -225,3 +299,7 @@ async def models_status():
         },
         "error": None,
     }
+
+
+# ============== 靜態檔案（提供音訊/影片下載） ==============
+app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")

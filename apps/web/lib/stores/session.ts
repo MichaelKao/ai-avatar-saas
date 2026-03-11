@@ -4,6 +4,8 @@ export interface AiSuggestion {
   id: string;
   text: string;
   timestamp: number;
+  audioUrl?: string;
+  videoUrl?: string;
 }
 
 interface SessionState {

@@ -14,8 +14,10 @@ interface WebSocketPanelProps {
 export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [inputText, setInputText] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [ttsStatus, setTtsStatus] = useState<string | null>(null);
   const {
     wsConnected,
     setWsConnected,
@@ -47,13 +49,34 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
           });
         } else if (msg.type === 'thinking_animation') {
           setIsThinking(msg.data?.status === 'start');
+        } else if (msg.type === 'tts_status') {
+          setTtsStatus(msg.data?.status || null);
         } else if (msg.type === 'tts_audio') {
-          // Mode 2/3: 收到 TTS 語音
-          addSuggestion({
-            id: 'tts-' + Date.now(),
-            text: '[TTS 語音已生成]',
-            timestamp: Date.now(),
-          });
+          setTtsStatus(null);
+          const audioUrl = msg.data?.audio_url;
+          if (audioUrl) {
+            // 自動播放 TTS 語音
+            if (audioRef.current) {
+              audioRef.current.src = audioUrl;
+              audioRef.current.play().catch(() => {});
+            }
+            addSuggestion({
+              id: 'tts-' + Date.now(),
+              text: '[TTS 語音]',
+              timestamp: Date.now(),
+              audioUrl,
+            });
+          }
+        } else if (msg.type === 'avatar_video') {
+          const videoUrl = msg.data?.video_url;
+          if (videoUrl) {
+            addSuggestion({
+              id: 'video-' + Date.now(),
+              text: '[Avatar 影片]',
+              timestamp: Date.now(),
+              videoUrl,
+            });
+          }
         } else if (msg.type === 'connected') {
           // 連線成功
         } else if (msg.type === 'error') {
@@ -119,6 +142,9 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
 
   return (
     <div className="bg-white rounded-xl shadow-sm border flex flex-col h-full">
+      {/* 隱藏的 Audio 元素 */}
+      <audio ref={audioRef} className="hidden" />
+
       {/* 標題 & 連線狀態 */}
       <div className="flex items-center justify-between px-5 py-3 border-b">
         <div className="flex items-center gap-2">
@@ -161,10 +187,33 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
           </p>
         ) : (
           suggestions.map((s) => (
-            <div key={s.id} className="bg-blue-50 rounded-lg p-3">
-              <p className="text-sm text-gray-800 whitespace-pre-wrap">
-                {escapeHtml(s.text)}
-              </p>
+            <div key={s.id} className="rounded-lg p-3" style={{
+              backgroundColor: s.videoUrl ? '#FFF7ED' : s.audioUrl ? '#F5F3FF' : '#EFF6FF',
+            }}>
+              {/* Avatar 影片 */}
+              {s.videoUrl && (
+                <div className="mb-2">
+                  <video
+                    src={s.videoUrl}
+                    controls
+                    autoPlay
+                    className="rounded-lg max-w-xs"
+                    style={{ maxHeight: '240px' }}
+                  />
+                </div>
+              )}
+              {/* TTS 音訊播放器 */}
+              {s.audioUrl && !s.videoUrl && (
+                <div className="mb-2">
+                  <audio src={s.audioUrl} controls className="w-full h-8" />
+                </div>
+              )}
+              {/* 文字內容 */}
+              {!s.audioUrl && !s.videoUrl && (
+                <p className="text-sm text-gray-800 whitespace-pre-wrap">
+                  {escapeHtml(s.text)}
+                </p>
+              )}
               <p className="text-xs text-gray-400 mt-1">
                 {new Date(s.timestamp).toLocaleTimeString('zh-TW')}
               </p>
@@ -179,6 +228,16 @@ export default function WebSocketPanel({ sessionId }: WebSocketPanelProps) {
               <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
             AI 思考中...
+          </div>
+        )}
+        {ttsStatus === 'generating' && (
+          <div className="flex items-center gap-2 text-sm text-purple-400 py-2">
+            <div className="flex gap-1">
+              <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            {mode === 3 ? '生成語音 + 臉部動畫...' : '生成語音中...'}
           </div>
         )}
         <div ref={messagesEndRef} />

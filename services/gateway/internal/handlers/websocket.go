@@ -177,16 +177,24 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			personality.Language = "zh-TW"
 		}
 
-		// 取得用戶的 voice_id（Mode 2/3 用）
+		// 取得用戶的 voice_id 和 face_image_url（Mode 2/3 用）
 		var voiceID string
+		var faceImageURL string
 		h.db.Get(&voiceID,
 			`SELECT COALESCE(voice_model_id, '') FROM avatar_profiles WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
 			userID,
 		)
+		h.db.Get(&faceImageURL,
+			`SELECT COALESCE(face_image_url, '') FROM avatar_profiles WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
+			userID,
+		)
 
-		// 如果沒有設定 voice_id，使用預設聲音，確保 Mode 2 TTS 總是可用
+		// 如果沒有設定，使用預設值
 		if voiceID == "" {
 			voiceID = "default"
+		}
+		if faceImageURL == "" {
+			faceImageURL = "default"
 		}
 
 		// 發送連線成功訊息
@@ -265,14 +273,14 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				},
 			})
 
-			// Mode 2/3: 呼叫 GPU 服務做 TTS 語音合成
-			if msg.Mode >= 2 && voiceID != "" {
+			// Mode 2: TTS 語音合成
+			if msg.Mode == 2 && voiceID != "" {
 				writeWSMessage(conn, WSMessage{
 					Type: "tts_status",
 					Data: fiber.Map{"status": "generating"},
 				})
 
-				ttsURL, err := callGPUTTS(aiResponse.Text, voiceID)
+				audioURL, err := callGPUTTS(aiResponse.Text, voiceID)
 				if err != nil {
 					log.Printf("TTS 失敗: %v", err)
 					writeWSMessage(conn, WSMessage{
@@ -283,10 +291,46 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					writeWSMessage(conn, WSMessage{
 						Type: "tts_audio",
 						Data: fiber.Map{
-							"audio_url":  ttsURL,
+							"audio_url":  audioURL,
 							"session_id": sessionID,
 						},
 					})
+				}
+			}
+
+			// Mode 3: TTS + 臉部動畫（Wav2Lip）
+			if msg.Mode == 3 {
+				writeWSMessage(conn, WSMessage{
+					Type: "tts_status",
+					Data: fiber.Map{"status": "generating"},
+				})
+
+				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, faceImageURL)
+				if err != nil {
+					log.Printf("Mode 3 Avatar 失敗: %v", err)
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_status",
+						Data: fiber.Map{"status": "error", "error": err.Error()},
+					})
+				} else {
+					// 發送 TTS 音訊
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio",
+						Data: fiber.Map{
+							"audio_url":  audioURL,
+							"session_id": sessionID,
+						},
+					})
+					// 發送 Avatar 影片（如果有生成）
+					if videoURL != "" {
+						writeWSMessage(conn, WSMessage{
+							Type: "avatar_video",
+							Data: fiber.Map{
+								"video_url":  videoURL,
+								"session_id": sessionID,
+							},
+						})
+					}
 				}
 			}
 
@@ -307,14 +351,15 @@ func writeWSMessage(conn *websocket.Conn, msg WSMessage) {
 	}
 }
 
-// TTSResponse GPU TTS 回應
-type TTSResponse struct {
+// GPUResponse GPU 服務通用回應
+type GPUResponse struct {
 	Data struct {
 		AudioURL string `json:"audio_url"`
+		VideoURL string `json:"video_url"`
 	} `json:"data"`
 }
 
-// callGPUTTS 呼叫 GPU 服務做語音合成
+// callGPUTTS 呼叫 GPU 服務做語音合成（Mode 2）
 func callGPUTTS(text, voiceID string) (string, error) {
 	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
 	if gpuServiceURL == "" {
@@ -342,8 +387,54 @@ func callGPUTTS(text, voiceID string) (string, error) {
 		return "", fmt.Errorf("GPU TTS 錯誤 (%d): %s", resp.StatusCode, string(body))
 	}
 
-	// GPU 服務直接回傳音訊檔，回傳 URL 讓前端下載
-	return gpuServiceURL + "/api/v1/tts/synthesize", nil
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return "", fmt.Errorf("解析 GPU 回應失敗: %w", err)
+	}
+
+	// 回傳完整 URL
+	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+}
+
+// callGPUAvatar 呼叫 GPU 服務做 TTS + 臉部動畫（Mode 3）
+func callGPUAvatar(text, voiceID, faceImageURL string) (audioURL string, videoURL string, err error) {
+	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
+	if gpuServiceURL == "" {
+		gpuServiceURL = "http://localhost:8002"
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":           text,
+		"voice_id":       voiceID,
+		"face_image_url": faceImageURL,
+	})
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Post(
+		gpuServiceURL+"/api/v1/avatar/generate-talking",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("GPU Avatar 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return "", "", fmt.Errorf("解析 GPU 回應失敗: %w", err)
+	}
+
+	audioURL = gpuServiceURL + gpuResp.Data.AudioURL
+	if gpuResp.Data.VideoURL != "" {
+		videoURL = gpuServiceURL + gpuResp.Data.VideoURL
+	}
+	return audioURL, videoURL, nil
 }
 
 // callAIService 呼叫 Python LLM 服務
