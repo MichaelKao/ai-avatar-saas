@@ -16,13 +16,18 @@ app.add_middleware(
 whisper_model = None
 
 
-@app.on_event("startup")
-def load_model():
+def load():
+    """載入 Whisper 模型（combined.py 呼叫）"""
     global whisper_model
     from faster_whisper import WhisperModel
     logger.info("Loading Whisper large-v3...")
     whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
     logger.info("Whisper model loaded")
+
+
+@app.on_event("startup")
+def load_model():
+    load()
 
 
 @app.get("/health")
