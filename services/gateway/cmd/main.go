@@ -68,6 +68,9 @@ func main() {
 	// 速率限制
 	app.Use(middleware.RateLimiter())
 
+	// 錯誤日誌中間件（記錄所有 4xx/5xx）
+	app.Use(handlers.ErrorLoggerMiddleware())
+
 	// 靜態檔案（上傳目錄）
 	app.Static("/uploads", "./uploads")
 
@@ -116,7 +119,7 @@ func main() {
 	personalityGroup.Post("/", personalityHandler.Create)
 	personalityGroup.Put("/:id", personalityHandler.Update)
 	personalityGroup.Delete("/:id", personalityHandler.Delete)
-	personalityGroup.Post("/:id/default", personalityHandler.SetDefault)
+	personalityGroup.Post("/:id/set-default", personalityHandler.SetDefault)
 
 	// 會議 Session 路由
 	sessionHandler := handlers.NewSessionHandler(db)
@@ -133,6 +136,12 @@ func main() {
 	billingGroup.Post("/cancel", billingHandler.Cancel)
 	billingGroup.Get("/status", billingHandler.GetStatus)
 	billingGroup.Post("/portal", billingHandler.CreatePortalSession)
+
+	// 日誌查詢路由（需要認證）
+	logsHandler := handlers.NewLogsHandler()
+	logsGroup := protected.Group("/logs")
+	logsGroup.Get("/", logsHandler.GetLogs)
+	logsGroup.Delete("/", logsHandler.ClearLogs)
 
 	// WebSocket 路由（含自訂 JWT 驗證）
 	wsHandler := handlers.NewWebSocketHandler(db)

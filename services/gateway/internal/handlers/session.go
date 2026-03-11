@@ -43,11 +43,14 @@ func (h *SessionHandler) StartSession(c *fiber.Ctx) error {
 	userID := c.Locals("userID").(string)
 
 	var req StartSessionRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"data":  nil,
-			"error": "請求格式錯誤",
-		})
+	// 允許空 body（前端可能不帶 body 呼叫）
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"data":  nil,
+				"error": "請求格式錯誤",
+			})
+		}
 	}
 
 	// 預設模式為 meeting
