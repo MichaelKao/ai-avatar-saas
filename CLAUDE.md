@@ -3,7 +3,7 @@
 ## 線上環境
 | 服務 | URL | 說明 |
 |------|-----|------|
-| Web 前端 | https://ai-avatar-saas.vercel.app (或自訂域名) | Next.js 前台 |
+| Web 前端 | https://ai-avatar-saas-production-f9f9.up.railway.app | Next.js 前台，Railway 部署 |
 | API Gateway | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 部署 |
 | GPU 服務 | https://oq00jb5vt1laws-8888.proxy.runpod.net | RunPod A40，含 STT/TTS/Avatar/LLM proxy |
 | 健康檢查 | https://ai-avatar-saas-production.up.railway.app/health | Gateway |

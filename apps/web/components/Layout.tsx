@@ -19,9 +19,8 @@ const navItems = [
 
 const planLabels: Record<string, { text: string; color: string }> = {
   free: { text: '免費版', color: 'bg-gray-100 text-gray-700' },
-  starter: { text: '入門版', color: 'bg-blue-100 text-blue-700' },
   pro: { text: '專業版', color: 'bg-purple-100 text-purple-700' },
-  ultimate: { text: '旗艦版', color: 'bg-yellow-100 text-yellow-800' },
+  enterprise: { text: '企業版', color: 'bg-yellow-100 text-yellow-800' },
 };
 
 export default function DashboardLayout({

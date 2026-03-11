@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { escapeHtml } from '@/lib/utils';
 
 interface LogEntry {
   id: number;
@@ -15,6 +16,7 @@ interface LogEntry {
   created_at: string;
 }
 
+// TODO: 此頁面應限制為管理員存取（admin-only access）
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState<'all' | 'errors'>('all');
@@ -180,17 +182,17 @@ export default function LogsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <span className="font-mono text-xs bg-gray-100 px-2 py-0.5 rounded">
-                        {log.method}
+                        {escapeHtml(log.method)}
                       </span>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-gray-700 max-w-[200px] truncate">
-                      {log.path}
+                      {escapeHtml(log.path)}
                     </td>
                     <td className="px-4 py-3 text-gray-600 max-w-[300px] truncate">
-                      {parseMessage(log.message)}
+                      {escapeHtml(parseMessage(log.message))}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-gray-400">
-                      {log.ip}
+                      {escapeHtml(log.ip)}
                     </td>
                   </tr>
                 ))}

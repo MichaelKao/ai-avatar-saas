@@ -285,10 +285,10 @@ export default function AvatarPage() {
           上傳一段 10-30 秒的語音，AI 會克隆你的聲音。
         </p>
 
-        {profile?.voiceSampleUrl && (
+        {(profile?.voiceSampleUrl || profile?.voice_sample_url) && (
           <div className="mb-4">
             <audio controls className="w-full">
-              <source src={profile.voiceSampleUrl} />
+              <source src={profile.voiceSampleUrl || profile.voice_sample_url || ''} />
             </audio>
           </div>
         )}

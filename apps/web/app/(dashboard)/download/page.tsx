@@ -1,7 +1,7 @@
 'use client';
 
 const DOWNLOAD_URL =
-  'https://github.com/MichaelKao/ai-avatar-saas/releases/latest/download/AI.Avatar.Desktop_0.1.0_x64-setup.exe';
+  'https://github.com/MichaelKao/ai-avatar-saas/releases/latest/download/AI.Avatar.Desktop_0.3.0_x64-setup.exe';
 
 export default function DownloadPage() {
   return (

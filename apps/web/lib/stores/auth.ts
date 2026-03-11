@@ -18,7 +18,7 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: typeof window !== 'undefined'
-    ? JSON.parse(localStorage.getItem('auth-user') || 'null')
+    ? (() => { try { return JSON.parse(localStorage.getItem('auth-user') || 'null'); } catch { return null; } })()
     : null,
   token: typeof window !== 'undefined'
     ? localStorage.getItem('auth-token')

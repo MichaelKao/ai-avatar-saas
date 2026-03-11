@@ -6,6 +6,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useSessionStore } from '@/lib/stores/session';
 import { toast } from '@/components/Toast';
 import { formatDuration } from '@/lib/utils';
+import Link from 'next/link';
 import WebSocketPanel from './websocket-panel';
 
 export default function SessionPage() {
@@ -262,12 +263,12 @@ export default function SessionPage() {
               >
                 新的會議
               </button>
-              <a
+              <Link
                 href="/dashboard"
                 className="px-6 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
               >
                 返回儀表板
-              </a>
+              </Link>
             </div>
           </div>
         </div>
