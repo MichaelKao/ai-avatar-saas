@@ -80,20 +80,12 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
     }
     setLoading(true);
     try {
-      const resp = await fetch(`${apiUrl}/api/v1/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const body = await resp.json();
-      if (!resp.ok) {
-        throw new Error(body.error || body.message || '登入失敗，請確認帳號密碼');
-      }
+      const body: any = await invoke('api_login', { apiUrl, email, password });
       const token = body.data?.token;
       if (!token) throw new Error('伺服器回傳格式異常，未取得 token');
       onLogin(token);
     } catch (err: any) {
-      setError(err.message || '登入失敗');
+      setError(typeof err === 'string' ? err : (err.message || '登入失敗'));
     } finally {
       setLoading(false);
     }
@@ -457,23 +449,19 @@ function App() {
     addLog('system', '正在建立連線...');
 
     try {
-      // Step 1: Create session
+      // Step 1: Create session (via Rust backend to avoid CORS)
       addLog('system', '建立 AI 會議 Session...');
-      const resp = await fetch(`${apiUrl}/api/v1/session/start`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-      const data = await resp.json();
-
-      if (resp.status === 401 || resp.status === 403) {
-        addLog('system', 'Token 已過期，請重新登入');
-        handleLogout();
-        return;
+      let data: any;
+      try {
+        data = await invoke('api_start_session', { apiUrl, token });
+      } catch (err: any) {
+        if (err === 'TOKEN_EXPIRED') {
+          addLog('system', 'Token 已過期，請重新登入');
+          handleLogout();
+          return;
+        }
+        throw new Error(typeof err === 'string' ? err : (err.message || '建立 Session 失敗'));
       }
-      if (!resp.ok) throw new Error(data.error || '建立 Session 失敗');
 
       const sid = data.data?.sessionId || data.data?.id;
       if (!sid) throw new Error('無法取得 Session ID');
@@ -503,10 +491,7 @@ function App() {
       await invoke('disconnect_session');
 
       if (sessionId) {
-        await fetch(`${apiUrl}/api/v1/session/${sessionId}/end`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        }).catch(() => {});
+        await invoke('api_end_session', { apiUrl, token, sessionId }).catch(() => {});
       }
     } catch (e) {
       console.error(e);

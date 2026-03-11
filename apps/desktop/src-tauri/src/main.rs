@@ -17,6 +17,9 @@ fn main() {
             stop_auto_mode,
             check_virtual_devices,
             list_audio_devices,
+            api_login,
+            api_start_session,
+            api_end_session,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -200,6 +203,71 @@ fn list_audio_devices() -> Result<serde_json::Value, String> {
         "output_devices": outputs,
         "input_devices": inputs,
     }))
+}
+
+/// 登入 API（透過 Rust 後端，避免 CORS 問題）
+#[tauri::command]
+async fn api_login(api_url: String, email: String, password: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/auth/login", api_url))
+        .json(&serde_json::json!({ "email": email, "password": password }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("連線失敗: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("回應解析失敗: {}", e))?;
+
+    if status >= 400 {
+        let error_msg = body["error"].as_str().unwrap_or("登入失敗，請確認帳號密碼");
+        return Err(error_msg.to_string());
+    }
+
+    Ok(body)
+}
+
+/// 建立 Session（透過 Rust 後端，避免 CORS 問題）
+#[tauri::command]
+async fn api_start_session(api_url: String, token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/session/start", api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("連線失敗: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("回應解析失敗: {}", e))?;
+
+    if status == 401 || status == 403 {
+        return Err("TOKEN_EXPIRED".to_string());
+    }
+    if status >= 400 {
+        let error_msg = body["error"].as_str().unwrap_or("建立 Session 失敗");
+        return Err(error_msg.to_string());
+    }
+
+    Ok(body)
+}
+
+/// 結束 Session（透過 Rust 後端）
+#[tauri::command]
+async fn api_end_session(api_url: String, token: String, session_id: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let _ = client
+        .delete(format!("{}/api/v1/session/{}/end", api_url, session_id))
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+    Ok(())
 }
 
 /// Calculate RMS of audio samples
