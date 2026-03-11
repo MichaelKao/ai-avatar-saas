@@ -33,12 +33,23 @@ export default function Home() {
           在 Zoom、Teams、Google Meet 中使用 AI 數位分身，
           自動聆聽對話、生成回覆、克隆你的聲音與臉部表情。
         </p>
-        <Link
-          href="/register"
-          className="inline-block px-8 py-4 bg-blue-600 text-white text-lg rounded-xl hover:bg-blue-700 font-medium shadow-lg"
-        >
-          開始使用 — 免費
-        </Link>
+        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <Link
+            href="/register"
+            className="inline-block px-8 py-4 bg-blue-600 text-white text-lg rounded-xl hover:bg-blue-700 font-medium shadow-lg"
+          >
+            開始使用 — 免費
+          </Link>
+          <a
+            href="https://github.com/MichaelKao/ai-avatar-saas/releases/latest/download/AI.Avatar.Desktop_0.1.0_x64-setup.exe"
+            className="inline-flex items-center gap-2 px-8 py-4 bg-gray-900 text-white text-lg rounded-xl hover:bg-gray-800 font-medium shadow-lg"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" />
+            </svg>
+            下載桌面版 App
+          </a>
+        </div>
       </section>
 
       {/* 三種模式 */}
