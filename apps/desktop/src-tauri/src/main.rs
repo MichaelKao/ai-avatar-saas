@@ -32,6 +32,7 @@ fn main() {
             stop_obs_virtual_cam,
             ensure_obs_ready,
             cleanup_obs,
+            set_voice_and_face,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -577,6 +578,13 @@ async fn ensure_obs_ready(app: tauri::AppHandle) -> Result<String, String> {
 async fn cleanup_obs() -> Result<String, String> {
     obs_manager::cleanup_obs().await?;
     Ok("OBS 已清理".to_string())
+}
+
+/// 設定聲音性別和 webcam 截圖（前端呼叫）
+#[tauri::command]
+async fn set_voice_and_face(voice_gender: String, face_image_base64: String) -> Result<(), String> {
+    websocket_client::set_session_config(&voice_gender, &face_image_base64).await;
+    Ok(())
 }
 
 /// Calculate RMS of audio samples

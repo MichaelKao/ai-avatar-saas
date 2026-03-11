@@ -351,6 +351,7 @@ function MainApp() {
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://ai-avatar-saas-production.up.railway.app');
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://oq00jb5vt1laws-8888.proxy.runpod.net');
   const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
+  const [voiceGender, setVoiceGender] = useState<'male' | 'female'>(() => (localStorage.getItem('voiceGender') as any) || 'female');
   const [showSettings, setShowSettings] = useState(false);
 
   // Runtime state
@@ -376,7 +377,8 @@ function MainApp() {
     localStorage.setItem('apiUrl', apiUrl);
     localStorage.setItem('gpuUrl', gpuUrl);
     localStorage.setItem('mode', mode.toString());
-  }, [apiUrl, gpuUrl, mode]);
+    localStorage.setItem('voiceGender', voiceGender);
+  }, [apiUrl, gpuUrl, mode, voiceGender]);
 
   useEffect(() => {
     if (token) localStorage.setItem('token', token);
@@ -535,6 +537,38 @@ function MainApp() {
   // -----------------------------------------------------------------------
   // Start / Stop
   // -----------------------------------------------------------------------
+  // 擷取 webcam 單幀截圖（base64 JPEG）
+  const captureWebcamFrame = async (): Promise<string> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: 'user' },
+      });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.playsInline = true;
+      await video.play();
+
+      // 等一小段時間讓畫面穩定
+      await new Promise(r => setTimeout(r, 500));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(video, 0, 0);
+
+      // 停止 webcam
+      stream.getTracks().forEach(t => t.stop());
+
+      // 轉成 base64（去掉 data:image/jpeg;base64, 前綴）
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      return dataUrl.split(',')[1] || '';
+    } catch (e) {
+      console.warn('Webcam 擷取失敗:', e);
+      return '';
+    }
+  };
+
   const handleStart = async () => {
     setStatus('connecting');
     setLogs([]);
@@ -543,6 +577,23 @@ function MainApp() {
     addLog('system', '正在建立連線...');
 
     try {
+      // Mode 2/3：擷取 webcam 截圖 + 設定聲音性別
+      let faceBase64 = '';
+      if (mode >= 2) {
+        addLog('system', '正在擷取臉部截圖...');
+        faceBase64 = await captureWebcamFrame();
+        if (faceBase64) {
+          addLog('system', '臉部截圖完成');
+        } else {
+          addLog('system', '未偵測到攝影機，將使用預設臉部');
+        }
+        // 傳送聲音性別 + 臉部截圖到 Rust 後端
+        await invoke('set_voice_and_face', {
+          voiceGender,
+          faceImageBase64: faceBase64,
+        });
+      }
+
       // Mode 3：自動設定虛擬鏡頭（OBS 全自動，使用者不需要操作）
       if (mode === 3) {
         addLog('system', '正在準備虛擬鏡頭環境...');
@@ -732,7 +783,7 @@ function MainApp() {
           </div>
 
           {/* Mode selector */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
             {[
               { id: 1, name: 'Mode 1 提詞', color: '#3b82f6' },
               { id: 2, name: 'Mode 2 語音', color: '#8b5cf6' },
@@ -753,6 +804,38 @@ function MainApp() {
               </button>
             ))}
           </div>
+
+          {/* 預設聲音性別（Mode 2/3 使用） */}
+          {mode >= 2 && (
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>
+                預設聲音
+              </label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {([
+                  { id: 'female' as const, name: '女聲', emoji: '\u{1F469}' },
+                  { id: 'male' as const, name: '男聲', emoji: '\u{1F468}' },
+                ] as const).map(g => (
+                  <button key={g.id} onClick={() => setVoiceGender(g.id)} style={{
+                    flex: 1,
+                    padding: '8px 0',
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    border: `2px solid ${voiceGender === g.id ? '#8b5cf6' : (dark ? '#475569' : '#cbd5e1')}`,
+                    background: voiceGender === g.id ? 'rgba(139,92,246,0.2)' : 'transparent',
+                    color: voiceGender === g.id ? '#c4b5fd' : (dark ? '#94a3b8' : '#64748b'),
+                  }}>
+                    {g.emoji} {g.name}
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
+                未上傳自訂聲音時使用，啟動時會自動擷取 webcam 臉部
+              </div>
+            </div>
+          )}
 
           {/* Logout */}
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>

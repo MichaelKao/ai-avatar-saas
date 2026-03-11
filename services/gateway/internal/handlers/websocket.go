@@ -30,10 +30,12 @@ type WSMessage struct {
 
 // TranscriptionMessage 語音辨識文字訊息
 type TranscriptionMessage struct {
-	Text      string `json:"text"`
-	SessionID string `json:"session_id"`
-	Language  string `json:"language"`
-	Mode      int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
+	Text             string `json:"text"`
+	SessionID        string `json:"session_id"`
+	Language         string `json:"language"`
+	Mode             int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
+	VoiceGender      string `json:"voice_gender,omitempty"`       // "male" 或 "female"
+	FaceImageBase64  string `json:"face_image_base64,omitempty"`  // 即時 webcam 截圖
 }
 
 // AIServiceRequest 呼叫 AI 服務的請求
@@ -273,6 +275,12 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				},
 			})
 
+			// 決定聲音性別（優先用訊息帶的，否則預設 female）
+			voiceGender := msg.VoiceGender
+			if voiceGender == "" {
+				voiceGender = "female"
+			}
+
 			// Mode 2: TTS 語音合成
 			if msg.Mode == 2 && voiceID != "" {
 				writeWSMessage(conn, WSMessage{
@@ -280,7 +288,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					Data: fiber.Map{"status": "generating"},
 				})
 
-				audioURL, err := callGPUTTS(aiResponse.Text, voiceID)
+				audioURL, err := callGPUTTS(aiResponse.Text, voiceID, voiceGender)
 				if err != nil {
 					log.Printf("TTS 失敗: %v", err)
 					writeWSMessage(conn, WSMessage{
@@ -305,7 +313,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					Data: fiber.Map{"status": "generating"},
 				})
 
-				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, faceImageURL)
+				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, voiceGender, faceImageURL, msg.FaceImageBase64)
 				if err != nil {
 					log.Printf("Mode 3 Avatar 失敗: %v", err)
 					writeWSMessage(conn, WSMessage{
@@ -360,15 +368,16 @@ type GPUResponse struct {
 }
 
 // callGPUTTS 呼叫 GPU 服務做語音合成（Mode 2）
-func callGPUTTS(text, voiceID string) (string, error) {
+func callGPUTTS(text, voiceID, voiceGender string) (string, error) {
 	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
 	if gpuServiceURL == "" {
 		gpuServiceURL = "http://localhost:8002"
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{
-		"text":     text,
-		"voice_id": voiceID,
+		"text":         text,
+		"voice_id":     voiceID,
+		"voice_gender": voiceGender,
 	})
 
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -397,17 +406,22 @@ func callGPUTTS(text, voiceID string) (string, error) {
 }
 
 // callGPUAvatar 呼叫 GPU 服務做 TTS + 臉部動畫（Mode 3）
-func callGPUAvatar(text, voiceID, faceImageURL string) (audioURL string, videoURL string, err error) {
+func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 string) (audioURL string, videoURL string, err error) {
 	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
 	if gpuServiceURL == "" {
 		gpuServiceURL = "http://localhost:8002"
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{
+	payload := map[string]string{
 		"text":           text,
 		"voice_id":       voiceID,
+		"voice_gender":   voiceGender,
 		"face_image_url": faceImageURL,
-	})
+	}
+	if faceImageBase64 != "" {
+		payload["face_image_base64"] = faceImageBase64
+	}
+	reqBody, _ := json.Marshal(payload)
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Post(

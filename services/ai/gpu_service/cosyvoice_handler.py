@@ -60,17 +60,22 @@ class CosyVoiceHandler:
         self.voice_profiles[voice_id] = str(profile_path)
         logger.info(f"聲音檔案已建立: {voice_id}")
 
-    def synthesize_default(self, text: str, output_path: str):
+    # 性別對應 CosyVoice 內建 speaker
+    GENDER_SPEAKER_MAP = {
+        "male": "中文男",
+        "female": "中文女",
+    }
+
+    def synthesize_default(self, text: str, output_path: str, voice_gender: str = "female"):
         """使用內建預設聲音進行文字轉語音（不需要克隆的聲音檔案）"""
         import torchaudio
 
-        # 使用 CosyVoice2 的 inference_sft 方法搭配內建 speaker
-        # CosyVoice2 內建 speaker 包含 "中文女"、"中文男"、"英文女"、"英文男" 等
-        default_speaker = "中文女"
+        # 根據性別選擇 CosyVoice2 內建 speaker
+        speaker = self.GENDER_SPEAKER_MAP.get(voice_gender, "中文女")
 
         output = self.model.inference_sft(
             tts_text=text,
-            spk_id=default_speaker,
+            spk_id=speaker,
             stream=False,
         )
 

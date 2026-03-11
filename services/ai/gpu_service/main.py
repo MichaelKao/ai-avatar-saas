@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import base64
 import httpx
 import torch
 
@@ -114,6 +115,7 @@ async def health():
 class TTSRequest(BaseModel):
     text: str
     voice_id: str  # 用戶的聲音模型 ID
+    voice_gender: str = "female"  # "male" 或 "female"，僅 voice_id="default" 時使用
 
 
 @app.post("/api/v1/tts/clone-voice")
@@ -148,7 +150,7 @@ async def synthesize_speech(request: TTSRequest):
         filename = f"tts_{uuid.uuid4()}.wav"
         output_path = OUTPUT_DIR / filename
         if request.voice_id == "default":
-            cosyvoice_model.synthesize_default(request.text, str(output_path))
+            cosyvoice_model.synthesize_default(request.text, str(output_path), voice_gender=request.voice_gender)
         else:
             cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
         return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
@@ -348,10 +350,14 @@ async def generate_avatar_stream(
 
 # ============== Mode 3: 合併 TTS + 臉部動畫 ==============
 
+from typing import Optional
+
 class TalkingAvatarRequest(BaseModel):
     text: str
     voice_id: str = "default"
+    voice_gender: str = "female"  # "male" 或 "female"，僅 voice_id="default" 時使用
     face_image_url: str = "default"  # "default" 或圖片 URL
+    face_image_base64: Optional[str] = None  # 即時 webcam 截圖（base64 JPEG）
 
 
 @app.post("/api/v1/avatar/generate-talking")
@@ -367,7 +373,7 @@ async def generate_talking_avatar(request: TalkingAvatarRequest):
     audio_path = OUTPUT_DIR / audio_filename
     try:
         if request.voice_id == "default":
-            cosyvoice_model.synthesize_default(request.text, str(audio_path))
+            cosyvoice_model.synthesize_default(request.text, str(audio_path), voice_gender=request.voice_gender)
         else:
             cosyvoice_model.synthesize(request.text, request.voice_id, str(audio_path))
         logger.info(f"TTS 完成: {audio_filename}")
@@ -378,7 +384,17 @@ async def generate_talking_avatar(request: TalkingAvatarRequest):
     has_face = False
     face_path = UPLOAD_DIR / f"face_{req_id}.jpg"
 
-    if request.face_image_url == "default":
+    if request.face_image_base64:
+        # 從 base64 解碼即時 webcam 截圖
+        try:
+            img_data = base64.b64decode(request.face_image_base64)
+            with open(face_path, "wb") as f:
+                f.write(img_data)
+            has_face = True
+            logger.info(f"Webcam 截圖已儲存: {face_path}")
+        except Exception as e:
+            logger.warning(f"解碼 webcam base64 失敗: {e}")
+    elif request.face_image_url == "default":
         # 檢查是否有預設臉部圖片
         default_face = MODEL_DIR / "default_face.jpg"
         if default_face.exists():

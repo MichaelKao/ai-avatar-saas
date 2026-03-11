@@ -17,6 +17,19 @@ type WsSender = Arc<Mutex<Option<futures_util::stream::SplitSink<
 
 static WS_SENDER: std::sync::OnceLock<WsSender> = std::sync::OnceLock::new();
 
+/// Session 設定（聲音性別 + webcam 截圖）
+static SESSION_CONFIG: std::sync::OnceLock<Arc<Mutex<SessionConfig>>> = std::sync::OnceLock::new();
+
+#[derive(Default)]
+pub struct SessionConfig {
+    pub voice_gender: String,
+    pub face_image_base64: String,
+}
+
+fn get_session_config() -> &'static Arc<Mutex<SessionConfig>> {
+    SESSION_CONFIG.get_or_init(|| Arc::new(Mutex::new(SessionConfig::default())))
+}
+
 fn get_sender() -> &'static WsSender {
     WS_SENDER.get_or_init(|| Arc::new(Mutex::new(None)))
 }
@@ -66,16 +79,36 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
     Ok(())
 }
 
+/// 設定 session 的聲音性別和 webcam 截圖
+pub async fn set_session_config(voice_gender: &str, face_image_base64: &str) {
+    let config = get_session_config();
+    let mut guard = config.lock().await;
+    guard.voice_gender = voice_gender.to_string();
+    guard.face_image_base64 = face_image_base64.to_string();
+}
+
 /// 發送文字訊息到 Gateway
 pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
     let sender = get_sender();
     let mut guard = sender.lock().await;
 
     if let Some(ref mut ws) = *guard {
-        let msg = serde_json::json!({
+        // 從 session config 取得聲音性別和 webcam 截圖
+        let config = get_session_config();
+        let cfg = config.lock().await;
+
+        let mut msg = serde_json::json!({
             "text": text,
             "mode": mode,
         });
+
+        if !cfg.voice_gender.is_empty() {
+            msg["voice_gender"] = serde_json::Value::String(cfg.voice_gender.clone());
+        }
+        if !cfg.face_image_base64.is_empty() {
+            msg["face_image_base64"] = serde_json::Value::String(cfg.face_image_base64.clone());
+        }
+        drop(cfg);
 
         ws.send(Message::Text(msg.to_string()))
             .await
