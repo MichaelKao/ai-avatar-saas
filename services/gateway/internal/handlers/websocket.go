@@ -322,6 +322,21 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				} else {
 					// 無自訂聲音：用 Edge TTS（快速，<1 秒）
 					audioURL, ttsErr = callFastTTS(aiResponse.Text, voiceGender)
+					// Mode 3: Edge TTS 音訊 + Wav2Lip 臉部動畫
+					if ttsErr == nil && audioURL != "" && msg.Mode == 3 {
+						videoURL, wavErr := callWav2LipFromAudio(audioURL, faceImageURL, sessionFaceBase64)
+						if wavErr != nil {
+							log.Printf("Wav2Lip 失敗（仍會播放音訊）: %v", wavErr)
+						} else if videoURL != "" {
+							writeWSMessage(conn, WSMessage{
+								Type: "avatar_video",
+								Data: fiber.Map{
+									"video_url":  videoURL,
+									"session_id": sessionID,
+								},
+							})
+						}
+					}
 				}
 
 				if ttsErr != nil {
@@ -484,6 +499,55 @@ func callFastTTS(text, voiceGender string) (string, error) {
 	}
 
 	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+}
+
+// callWav2LipFromAudio 用既有音訊 + 臉部圖片產生 Wav2Lip 臉部動畫
+func callWav2LipFromAudio(audioURL, faceImageURL, faceImageBase64 string) (string, error) {
+	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
+	if gpuServiceURL == "" {
+		gpuServiceURL = "http://localhost:8002"
+	}
+
+	// 從完整 URL 中取出相對路徑（/outputs/xxx.wav）
+	relativeAudioURL := audioURL
+	if strings.HasPrefix(audioURL, gpuServiceURL) {
+		relativeAudioURL = audioURL[len(gpuServiceURL):]
+	}
+
+	payload := map[string]string{
+		"audio_url":      relativeAudioURL,
+		"face_image_url": faceImageURL,
+	}
+	if faceImageBase64 != "" {
+		payload["face_image_base64"] = faceImageBase64
+	}
+	reqBody, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Post(
+		gpuServiceURL+"/api/v1/avatar/animate-from-audio",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Wav2Lip 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return "", fmt.Errorf("解析 Wav2Lip 回應失敗: %w", err)
+	}
+
+	if gpuResp.Data.VideoURL != "" {
+		return gpuServiceURL + gpuResp.Data.VideoURL, nil
+	}
+	return "", nil
 }
 
 // callAIService 呼叫 Python LLM 服務

@@ -434,6 +434,77 @@ async def generate_talking_avatar(request: TalkingAvatarRequest):
     return {"data": result, "error": None}
 
 
+# ============== 從既有音訊生成臉部動畫（跳過 TTS） ==============
+
+class AnimateFromAudioRequest(BaseModel):
+    audio_url: str  # 音訊檔案相對路徑，例如 "/outputs/xxx.wav"
+    face_image_base64: Optional[str] = None  # 即時 webcam 截圖（base64 JPEG）
+    face_image_url: str = "default"  # "default" 或圖片 URL
+
+
+@app.post("/api/v1/avatar/animate-from-audio")
+async def animate_from_audio(request: AnimateFromAudioRequest):
+    """從既有音訊檔案 + 臉部圖片生成 Wav2Lip 影片（不做 TTS）
+    適用於 Edge TTS 已產生音訊，只需臉部動畫的場景
+    """
+    if wav2lip_model is None:
+        raise HTTPException(503, "Wav2Lip 模型未載入")
+
+    req_id = str(uuid.uuid4())
+
+    # Step 1: 解析音訊檔案路徑（去掉 /outputs/ 前綴）
+    audio_relative = request.audio_url.lstrip("/")
+    if audio_relative.startswith("outputs/"):
+        audio_relative = audio_relative[len("outputs/"):]
+    audio_path = OUTPUT_DIR / audio_relative
+
+    if not audio_path.exists():
+        raise HTTPException(404, f"音訊檔案不存在: {request.audio_url}")
+
+    # Step 2: 取得臉部圖片（與 generate_talking_avatar 相同邏輯）
+    face_path = UPLOAD_DIR / f"face_{req_id}.jpg"
+
+    if request.face_image_base64:
+        # 從 base64 解碼即時 webcam 截圖
+        try:
+            img_data = base64.b64decode(request.face_image_base64)
+            with open(face_path, "wb") as f:
+                f.write(img_data)
+            logger.info(f"Webcam 截圖已儲存: {face_path}")
+        except Exception as e:
+            raise HTTPException(400, f"解碼 webcam base64 失敗: {str(e)}")
+    elif request.face_image_url == "default":
+        # 使用預設臉部圖片
+        default_face = MODEL_DIR / "default_face.jpg"
+        if default_face.exists():
+            face_path = default_face
+        else:
+            raise HTTPException(400, "無預設臉部圖片，請提供 face_image_base64 或 face_image_url")
+    else:
+        # 從 URL 下載臉部圖片
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(request.face_image_url)
+                resp.raise_for_status()
+                with open(face_path, "wb") as f:
+                    f.write(resp.content)
+            logger.info(f"臉部圖片已下載: {face_path}")
+        except Exception as e:
+            raise HTTPException(500, f"下載臉部圖片失敗: {str(e)}")
+
+    # Step 3: Wav2Lip 臉部動畫
+    video_filename = f"video_{req_id}.mp4"
+    video_path = OUTPUT_DIR / video_filename
+    try:
+        wav2lip_model.generate_video(str(face_path), str(audio_path), str(video_path))
+        logger.info(f"Wav2Lip 影片完成（從既有音訊）: {video_filename}")
+    except Exception as e:
+        logger.error(f"Wav2Lip 失敗: {e}")
+        raise HTTPException(500, f"臉部動畫生成失敗: {str(e)}")
+
+    return {"data": {"video_url": f"/outputs/{video_filename}"}, "error": None}
+
+
 # ============== 模型管理 ==============
 
 @app.get("/api/v1/models/status")

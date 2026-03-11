@@ -89,37 +89,103 @@ fn get_status() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// 啟動自動模式 — 擷取系統音訊 → STT → 自動傳送
+/// STT 防抖緩衝區 — 累積 STT 文字，等待 3 秒無新結果後才送出
+struct DebounceState {
+    /// 累積的 STT 文字
+    buffer: String,
+    /// 正在等待的延遲傳送任務（3 秒計時器）
+    pending_timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// 全域防抖狀態（用 OnceLock + tokio::sync::Mutex 實作）
+fn debounce_state() -> &'static tokio::sync::Mutex<DebounceState> {
+    static STATE: std::sync::OnceLock<tokio::sync::Mutex<DebounceState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| {
+        tokio::sync::Mutex::new(DebounceState {
+            buffer: String::new(),
+            pending_timer: None,
+        })
+    })
+}
+
+/// 清除防抖狀態（停止自動模式時呼叫）
+async fn clear_debounce() {
+    let mut state = debounce_state().lock().await;
+    // 取消尚未觸發的計時器
+    if let Some(handle) = state.pending_timer.take() {
+        handle.abort();
+    }
+    state.buffer.clear();
+}
+
+/// 啟動自動模式 — 擷取系統音訊 → STT → 防抖後自動傳送
 #[tauri::command]
 async fn start_auto_mode(
     app: tauri::AppHandle,
     gpu_url: String,
     mode: i32,
 ) -> Result<String, String> {
+    // 啟動前先清除上一次的防抖狀態
+    clear_debounce().await;
+
     let mut rx = audio_capture::start_capture()?;
 
     let app_clone = app.clone();
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
-            // Skip silence (check RMS level)
+            // 跳過靜音（檢查 RMS 音量）
             let rms = calculate_rms(&chunk.data);
             if rms < 500.0 {
-                continue; // Too quiet, skip
+                continue;
             }
 
-            // Send to STT
+            // 送到 STT 辨識
             match stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url).await {
                 Ok(text) => {
                     let text = text.trim().to_string();
                     if !text.is_empty() && text.len() > 1 {
-                        // Emit STT result to frontend
+                        // 即時發送 STT 結果到前端（讓 UI 即時顯示逐字稿）
                         use tauri::Emitter;
                         app_clone.emit("stt-result", &text).ok();
 
-                        // Auto-send to WebSocket
-                        if let Err(e) = websocket_client::send_message(&text, mode).await {
-                            eprintln!("自動傳送失敗: {}", e);
+                        // 防抖機制：累積文字，重設 3 秒計時器
+                        let mut state = debounce_state().lock().await;
+
+                        // 將新的 STT 文字加入緩衝區（用空格分隔）
+                        if !state.buffer.is_empty() {
+                            state.buffer.push(' ');
                         }
+                        state.buffer.push_str(&text);
+
+                        // 取消現有的計時器（重新計時）
+                        if let Some(handle) = state.pending_timer.take() {
+                            handle.abort();
+                        }
+
+                        // 啟動新的 3 秒延遲傳送任務
+                        let send_mode = mode;
+                        let timer_handle = tokio::spawn(async move {
+                            // 等待 3 秒，若期間沒有新的 STT 結果就送出
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                            // 取出緩衝區內容並清空
+                            let accumulated_text = {
+                                let mut s = debounce_state().lock().await;
+                                let text = s.buffer.clone();
+                                s.buffer.clear();
+                                s.pending_timer = None;
+                                text
+                            };
+
+                            // 送出累積的完整文字到 WebSocket
+                            if !accumulated_text.is_empty() {
+                                if let Err(e) = websocket_client::send_message(&accumulated_text, send_mode).await {
+                                    eprintln!("自動傳送失敗: {}", e);
+                                }
+                            }
+                        });
+
+                        state.pending_timer = Some(timer_handle);
                     }
                 }
                 Err(e) => {
@@ -132,10 +198,11 @@ async fn start_auto_mode(
     Ok("自動模式已啟動".to_string())
 }
 
-/// 停止自動模式
+/// 停止自動模式（同時清除防抖緩衝區）
 #[tauri::command]
-fn stop_auto_mode() -> Result<String, String> {
+async fn stop_auto_mode() -> Result<String, String> {
     audio_capture::stop_capture();
+    clear_debounce().await;
     Ok("自動模式已停止".to_string())
 }
 

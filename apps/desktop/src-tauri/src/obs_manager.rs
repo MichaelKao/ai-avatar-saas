@@ -280,7 +280,8 @@ pub fn configure_obs() -> Result<(), String> {
 
     let basic_ini = profile_dir.join("basic.ini");
     if !basic_ini.exists() {
-        std::fs::write(&basic_ini, "[General]\nName=Untitled\n").ok();
+        // RecordWizard/StreamWizard=true 讓 OBS 認為精靈已完成，不再彈出設定視窗
+        std::fs::write(&basic_ini, "[General]\nName=Untitled\n\n[Wizard]\nRecordWizard=true\nStreamWizard=true\n").ok();
     }
 
     // === 建立基本場景集合 ===
