@@ -68,59 +68,106 @@ const IconCamera = () => (
 // AvatarWindow — 獨立無邊框視窗，只顯示 Avatar 影片（給 OBS 擷取用）
 // ---------------------------------------------------------------------------
 function AvatarWindow() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [videoUrl, setVideoUrl] = useState('');
-  const [hasVideo, setHasVideo] = useState(false);
+  const webcamRef = useRef<HTMLVideoElement | null>(null);
+  const avatarRef = useRef<HTMLVideoElement | null>(null);
+  const [showAvatar, setShowAvatar] = useState(false);
+  const [faceSnapshot, setFaceSnapshot] = useState('');
+  const [webcamReady, setWebcamReady] = useState(false);
 
+  // 啟動 webcam 作為預設畫面（OBS 擷取此視窗 → 對方看到你的真實臉）
   useEffect(() => {
-    const unlisten = listen<string>('avatar-video-update', (event) => {
-      setVideoUrl(event.payload);
-      setHasVideo(true);
+    let stream: MediaStream | null = null;
+    navigator.mediaDevices.getUserMedia({
+      video: { width: 320, height: 240, facingMode: 'user' },
+    }).then((s) => {
+      stream = s;
+      if (webcamRef.current) {
+        webcamRef.current.srcObject = s;
+        webcamRef.current.play().catch(() => {});
+        setWebcamReady(true);
+      }
+    }).catch(() => {
+      // webcam 不可用（可能被停用了），用靜態臉部截圖
+    });
+    return () => { stream?.getTracks().forEach(t => t.stop()); };
+  }, []);
+
+  // 接收臉部截圖（webcam 不可用時的備用畫面）
+  useEffect(() => {
+    const unlisten = listen<string>('avatar-face-snapshot', (event) => {
+      if (event.payload) setFaceSnapshot(event.payload);
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
+  // 接收 Wav2Lip 影片（AI 回應時播放）
   useEffect(() => {
-    if (videoUrl && videoRef.current) {
-      videoRef.current.src = videoUrl;
-      videoRef.current.play().catch(() => {});
-    }
-  }, [videoUrl]);
+    const unlisten = listen<string>('avatar-video-update', (event) => {
+      if (event.payload && avatarRef.current) {
+        avatarRef.current.src = event.payload;
+        avatarRef.current.play().then(() => {
+          setShowAvatar(true);
+        }).catch(() => {});
+      }
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  // 影片播放結束 → 回到 webcam 畫面
+  const handleAvatarEnded = () => {
+    setShowAvatar(false);
+  };
+
+  const containerStyle: React.CSSProperties = {
+    width: '100vw',
+    height: '100vh',
+    background: '#000',
+    position: 'relative',
+    overflow: 'hidden',
+    cursor: 'default',
+  };
+
+  const fullCover: React.CSSProperties = {
+    position: 'absolute',
+    top: 0, left: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  };
 
   return (
-    <div style={{
-      width: '100vw',
-      height: '100vh',
-      background: '#000',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      overflow: 'hidden',
-      cursor: 'default',
-    }}>
+    <div style={containerStyle}>
+      {/* 底層：webcam 即時畫面（鏡像，看起來自然） */}
       <video
-        ref={videoRef}
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          display: hasVideo ? 'block' : 'none',
-        }}
+        ref={webcamRef}
+        style={{ ...fullCover, transform: 'scaleX(-1)', display: webcamReady ? 'block' : 'none' }}
         playsInline
+        muted
       />
-      {!hasVideo && (
+      {/* 備用：靜態臉部截圖（webcam 不可用時） */}
+      {!webcamReady && faceSnapshot && (
+        <img
+          src={`data:image/jpeg;base64,${faceSnapshot}`}
+          style={{ ...fullCover, transform: 'scaleX(-1)' }}
+          alt=""
+        />
+      )}
+      {/* 頂層：Wav2Lip AI 影片（AI 回應時蓋住 webcam） */}
+      <video
+        ref={avatarRef}
+        style={{ ...fullCover, display: showAvatar ? 'block' : 'none', zIndex: 10 }}
+        playsInline
+        onEnded={handleAvatarEnded}
+        onError={handleAvatarEnded}
+      />
+      {/* 無任何畫面時顯示提示 */}
+      {!webcamReady && !faceSnapshot && (
         <div style={{
-          color: '#475569',
-          fontSize: 14,
+          ...fullCover, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: '#475569', fontSize: 14, textAlign: 'center',
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-          textAlign: 'center',
         }}>
-          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="#334155" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 12 }}>
-            <rect x="8" y="10" width="32" height="24" rx="4" />
-            <circle cx="24" cy="22" r="6" />
-            <path d="M16 38h16" />
-          </svg>
-          <div>等待 AI Avatar 影片...</div>
+          <div>啟動中...</div>
         </div>
       )}
     </div>
@@ -587,26 +634,7 @@ function MainApp() {
     addLog('system', '正在建立連線...');
 
     try {
-      // 自動將 Windows 預設麥克風切換為 CABLE Output
-      // 這樣 LINE/Zoom/Teams/Meet 全部自動使用虛擬麥克風，不需個別設定
-      if (mode >= 2) {
-        try {
-          const micResult: string = await invoke('auto_set_default_mic');
-          addLog('system', micResult);
-        } catch (err: any) {
-          addLog('system', `麥克風切換失敗: ${err}`);
-        }
-      }
-
-      // 自動停用真實攝影機，讓 LINE/Zoom/Teams/Meet 只看到 OBS Virtual Camera
-      try {
-        const camResult: string = await invoke('auto_disable_real_cameras');
-        addLog('system', camResult);
-      } catch (err: any) {
-        addLog('system', `攝影機設定: ${err}`);
-      }
-
-      // Mode 2/3：擷取 webcam 截圖 + 設定聲音性別
+      // Step 1: 先擷取 webcam 截圖（必須在停用攝影機之前）
       let faceBase64 = '';
       if (mode >= 2) {
         addLog('system', '正在擷取臉部截圖...');
@@ -616,26 +644,48 @@ function MainApp() {
         } else {
           addLog('system', '未偵測到攝影機，將使用預設臉部');
         }
-        // 傳送聲音性別 + 臉部截圖到 Rust 後端
         await invoke('set_voice_and_face', {
           voiceGender,
           faceImageBase64: faceBase64,
         });
       }
 
-      // Mode 3：自動設定虛擬鏡頭（OBS 全自動，使用者不需要操作）
+      // Step 2: Mode 3 — 開啟 Avatar 視窗 + OBS（Avatar 視窗會自動開啟 webcam）
       if (mode === 3) {
         addLog('system', '正在準備虛擬鏡頭環境...');
         await invoke('ensure_obs_ready');
 
-        // 開啟 Avatar 視窗（給 OBS 擷取用）
+        // 開啟 Avatar 視窗（內建 webcam 畫面，給 OBS 擷取用）
         await invoke('open_avatar_window');
         await new Promise(r => setTimeout(r, 800));
+
+        // 傳送臉部截圖到 Avatar 視窗（webcam 不可用時的備用畫面）
+        if (faceBase64) {
+          invoke('emit_avatar_face', { faceBase64 }).catch(() => {});
+        }
 
         // 設定 OBS 場景 + 啟動虛擬鏡頭
         const obsResult: string = await invoke('start_obs_virtual_cam', { password: null });
         setObsStatus('running');
         addLog('system', obsResult);
+      }
+
+      // Step 3: 自動切換麥克風為 VB-Cable
+      if (mode >= 2) {
+        try {
+          const micResult: string = await invoke('auto_set_default_mic');
+          addLog('system', micResult);
+        } catch (err: any) {
+          addLog('system', `麥克風切換失敗: ${err}`);
+        }
+      }
+
+      // Step 4: 停用真實攝影機（Avatar 視窗已取得 webcam stream，不受影響）
+      try {
+        const camResult: string = await invoke('auto_disable_real_cameras');
+        addLog('system', camResult);
+      } catch (err: any) {
+        addLog('system', `攝影機設定: ${err}`);
       }
 
       addLog('system', '建立 AI 會議 Session...');

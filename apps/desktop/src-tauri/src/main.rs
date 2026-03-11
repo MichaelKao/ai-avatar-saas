@@ -28,6 +28,7 @@ fn main() {
             open_avatar_window,
             close_avatar_window,
             emit_avatar_video,
+            emit_avatar_face,
             start_obs_virtual_cam,
             stop_obs_virtual_cam,
             ensure_obs_ready,
@@ -607,6 +608,15 @@ async fn close_avatar_window(app: tauri::AppHandle) -> Result<(), String> {
 async fn emit_avatar_video(app: tauri::AppHandle, video_url: String) -> Result<(), String> {
     use tauri::Emitter;
     app.emit_to("avatar", "avatar-video-update", &video_url)
+        .map_err(|e| format!("發送失敗: {}", e))?;
+    Ok(())
+}
+
+/// 發送臉部截圖到 Avatar 視窗（webcam 不可用時的備用畫面）
+#[tauri::command]
+async fn emit_avatar_face(app: tauri::AppHandle, face_base64: String) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit_to("avatar", "avatar-face-snapshot", &face_base64)
         .map_err(|e| format!("發送失敗: {}", e))?;
     Ok(())
 }
