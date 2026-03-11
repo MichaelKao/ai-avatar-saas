@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+/// AI 正在播放語音時暫停擷取（避免回饋迴圈）
+static PLAYBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Audio chunk - 16kHz 16-bit mono PCM
 pub struct AudioChunk {
@@ -44,6 +46,10 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
             &config.into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if !CAPTURING.load(Ordering::SeqCst) {
+                    return;
+                }
+                // AI 播放語音中 → 丟棄音訊，避免回饋迴圈
+                if PLAYBACK_ACTIVE.load(Ordering::SeqCst) {
                     return;
                 }
 
@@ -107,6 +113,11 @@ pub fn stop_capture() {
 
 pub fn is_capturing() -> bool {
     CAPTURING.load(Ordering::SeqCst)
+}
+
+/// 設定播放狀態（播放中暫停擷取，避免回饋迴圈）
+pub fn set_playback_active(active: bool) {
+    PLAYBACK_ACTIVE.store(active, Ordering::SeqCst);
 }
 
 /// Simple linear resampling

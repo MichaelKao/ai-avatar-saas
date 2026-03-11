@@ -519,6 +519,9 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
         None,
     ).map_err(|e| format!("建立音訊串流失敗: {}", e))?;
 
+    // 播放前暫停音訊擷取（避免 WASAPI loopback 擷取到 AI 自己的語音 → 回饋迴圈）
+    audio_capture::set_playback_active(true);
+
     stream.play().map_err(|e| format!("播放失敗: {}", e))?;
 
     // Wait for playback to finish
@@ -528,6 +531,11 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
     std::thread::sleep(std::time::Duration::from_millis(wait_ms));
 
     drop(stream);
+
+    // 播放結束，再多等 0.5 秒讓殘響消散，然後恢復擷取
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    audio_capture::set_playback_active(false);
+
     Ok(format!("已播放到 {} ({}Hz {}ch)", device_name, device_sample_rate, device_channels))
 }
 
