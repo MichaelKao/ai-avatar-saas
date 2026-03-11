@@ -35,6 +35,9 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
     std::thread::spawn(move || {
         let mut buffer: Vec<f32> = Vec::new();
         let chunk_size = sample_rate as usize * 3; // 3 seconds of audio
+        // 跳過前 1 秒的音訊（避免擷取到啟動前的殘留聲音）
+        let skip_samples = sample_rate as usize;
+        let mut skipped: usize = 0;
 
         let tx_clone = tx.clone();
         let stream = device.build_input_stream(
@@ -48,6 +51,12 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
                 let mono: Vec<f32> = data.chunks(channels)
                     .map(|frame| frame.iter().sum::<f32>() / channels as f32)
                     .collect();
+
+                // 跳過開頭的音訊殘留
+                if skipped < skip_samples {
+                    skipped += mono.len();
+                    return;
+                }
 
                 buffer.extend_from_slice(&mono);
 

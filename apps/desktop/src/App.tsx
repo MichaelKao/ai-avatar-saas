@@ -359,6 +359,7 @@ function MainApp() {
   const [sessionId, setSessionId] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [elapsed, setElapsed] = useState(0);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
@@ -430,11 +431,9 @@ function MainApp() {
           if (audioUrl) {
             invoke('play_audio_to_vbcable', { audioUrl }).then(() => {
               addLog('ai-audio', '語音已送出到虛擬麥克風');
-            }).catch(() => {
-              if (audioRef.current) {
-                audioRef.current.src = audioUrl;
-                audioRef.current.play().catch(() => {});
-              }
+            }).catch((err) => {
+              // 不要用系統喇叭播放！否則 WASAPI loopback 會錄到產生回饋迴圈
+              addLog('system', `VB-Cable 播放失敗: ${err}，請確認已安裝 VB-Cable`);
             });
           }
         } else if (msg.type === 'avatar_video') {
@@ -569,7 +568,18 @@ function MainApp() {
     }
   };
 
+  // 顯示設定指南後，確認再啟動
+  const handleStartClick = () => {
+    if (mode >= 2 && !localStorage.getItem('setupGuideShown')) {
+      setShowSetupGuide(true);
+      return;
+    }
+    handleStart();
+  };
+
   const handleStart = async () => {
+    setShowSetupGuide(false);
+    localStorage.setItem('setupGuideShown', 'true');
     setStatus('connecting');
     setLogs([]);
     setElapsed(0);
@@ -865,6 +875,49 @@ function MainApp() {
         </div>
       )}
 
+      {/* 首次啟動設定指南 */}
+      {showSetupGuide && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 999,
+          background: 'rgba(0,0,0,0.7)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            width: 420, padding: '28px 32px', borderRadius: 16,
+            background: '#1e293b', boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+          }}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 18, fontWeight: 700, color: '#f1f5f9' }}>
+              啟動前請先設定
+            </h3>
+            <div style={{ fontSize: 14, color: '#cbd5e1', lineHeight: 2 }}>
+              <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: 'rgba(251,191,36,0.15)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }}>
+                請先關閉 YouTube、音樂等其他播放音訊的程式，否則 AI 會聽到並回應那些聲音！
+              </div>
+              <p style={{ margin: '0 0 8px', fontWeight: 600 }}>請在通話軟體（LINE / Zoom / Meet）中設定：</p>
+              <ol style={{ margin: '0 0 4px', paddingLeft: 20 }}>
+                <li><b>麥克風</b> → 選擇「CABLE Output (VB-Audio Virtual Cable)」</li>
+                <li><b>鏡頭</b> → 選擇「OBS Virtual Camera」</li>
+              </ol>
+              <p style={{ margin: '8px 0 0', fontSize: 12, color: '#94a3b8' }}>
+                這樣 AI 的語音和畫面才會傳送給對方。設定完成後按下方按鈕開始。
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+              <button onClick={() => setShowSetupGuide(false)} style={{
+                flex: 1, padding: '10px 0', borderRadius: 8,
+                border: '1px solid #475569', background: 'transparent',
+                color: '#94a3b8', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              }}>取消</button>
+              <button onClick={handleStart} style={{
+                flex: 2, padding: '10px 0', borderRadius: 8,
+                border: 'none', background: gradientBg,
+                color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+              }}>已設定好，開始！</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main content area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
@@ -895,7 +948,7 @@ function MainApp() {
                 一鍵啟動 AI 分身。接起 Zoom、Google Meet、Teams、LINE 任何視訊或通話，AI 會自動聽對方說話、用你的聲音和臉回應。
               </p>
 
-              <button onClick={handleStart} style={{
+              <button onClick={handleStartClick} style={{
                 width: '100%',
                 padding: '14px 0',
                 borderRadius: 12,
@@ -1000,8 +1053,10 @@ function MainApp() {
                         {obsStatus === 'running' ? '虛擬鏡頭運行中' : '虛擬鏡頭待機'}
                       </div>
                       {obsStatus === 'running' && (
-                        <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
-                          在視訊軟體選擇「OBS Virtual Camera」
+                        <div style={{ fontSize: 10, color: '#fbbf24', marginTop: 2, fontWeight: 600 }}>
+                          LINE 鏡頭 → OBS Virtual Camera
+                          <br />
+                          LINE 麥克風 → CABLE Output
                         </div>
                       )}
                     </div>

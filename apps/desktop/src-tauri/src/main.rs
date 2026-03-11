@@ -526,11 +526,19 @@ async fn open_avatar_window(app: tauri::AppHandle) -> Result<String, String> {
     )
     .title("AI Avatar Camera")
     .decorations(false)
-    .always_on_top(true)
-    .inner_size(640.0, 480.0)
+    .always_on_top(false)
+    .inner_size(320.0, 240.0)
+    .position(0.0, 0.0)
+    .skip_taskbar(true)
     .resizable(true)
     .build()
     .map_err(|e| format!("開啟視窗失敗: {}", e))?;
+
+    // 移到螢幕左上角，盡量不遮擋使用者操作
+    // 注意：不能 minimize，否則 OBS 無法擷取
+    if let Some(window) = app.get_webview_window("avatar") {
+        window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: 0, y: 0 })).ok();
+    }
 
     Ok("Avatar 視窗已開啟".to_string())
 }
