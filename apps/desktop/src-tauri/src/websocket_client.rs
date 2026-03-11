@@ -95,7 +95,7 @@ pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
     if let Some(ref mut ws) = *guard {
         // 從 session config 取得聲音性別和 webcam 截圖
         let config = get_session_config();
-        let cfg = config.lock().await;
+        let mut cfg = config.lock().await;
 
         let mut msg = serde_json::json!({
             "text": text,
@@ -105,8 +105,10 @@ pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
         if !cfg.voice_gender.is_empty() {
             msg["voice_gender"] = serde_json::Value::String(cfg.voice_gender.clone());
         }
+        // face_image_base64 只送一次（第一則訊息），之後清掉避免浪費頻寬
         if !cfg.face_image_base64.is_empty() {
             msg["face_image_base64"] = serde_json::Value::String(cfg.face_image_base64.clone());
+            cfg.face_image_base64.clear();
         }
         drop(cfg);
 

@@ -210,6 +210,9 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			},
 		})
 
+		// 每個連線記住 face_image_base64（只需傳送一次）
+		var sessionFaceBase64 string
+
 		// 持續接收訊息
 		for {
 			var msg TranscriptionMessage
@@ -223,6 +226,11 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			// 設定 SessionID
 			if msg.SessionID == "" {
 				msg.SessionID = sessionID
+			}
+
+			// 儲存 face_image_base64（第一次傳送後記住，後續訊息不需再傳）
+			if msg.FaceImageBase64 != "" {
+				sessionFaceBase64 = msg.FaceImageBase64
 			}
 
 			// 忽略空訊息
@@ -313,7 +321,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					Data: fiber.Map{"status": "generating"},
 				})
 
-				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, voiceGender, faceImageURL, msg.FaceImageBase64)
+				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, voiceGender, faceImageURL, sessionFaceBase64)
 				if err != nil {
 					log.Printf("Mode 3 Avatar 失敗: %v", err)
 					writeWSMessage(conn, WSMessage{
