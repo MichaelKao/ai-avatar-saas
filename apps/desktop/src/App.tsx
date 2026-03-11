@@ -187,61 +187,32 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
 // SetupPage (first-run checklist)
 // ---------------------------------------------------------------------------
 function SetupPage({ onDone }: { onDone: () => void }) {
-  const [hasVbCable, setHasVbCable] = useState(false);
-  const [hasVirtualCam, setHasVirtualCam] = useState(false);
-  const [checking, setChecking] = useState(true);
-  const [installingVb, setInstallingVb] = useState(false);
-  const [installingObs, setInstallingObs] = useState(false);
-  const [progressMsg, setProgressMsg] = useState('');
+  const [progressMsg, setProgressMsg] = useState('正在檢測環境...');
+  const [error, setError] = useState('');
 
-  const detectDevices = async () => {
-    setChecking(true);
-    try {
-      const result: any = await invoke('check_virtual_devices');
-      setHasVbCable(result.has_vb_cable);
-      setHasVirtualCam(result.has_virtual_cam);
-    } catch (_) { /* ignore */ }
-    setChecking(false);
-  };
-
-  useEffect(() => { detectDevices(); }, []);
-
-  // Listen for install progress events
   useEffect(() => {
     const unlisten = listen<string>('install-progress', (event) => {
       setProgressMsg(event.payload);
     });
+
+    // Auto-setup: detect + install if needed, then proceed
+    const run = async () => {
+      try {
+        const result: any = await invoke('auto_setup');
+        if (result.vb_cable) {
+          setProgressMsg('環境就緒！');
+          setTimeout(() => onDone(), 500);
+        } else {
+          setError(result.message || 'VB-Cable 安裝失敗，請手動安裝後重啟 App');
+        }
+      } catch (e: any) {
+        setError(typeof e === 'string' ? e : (e.message || '環境設定失敗'));
+      }
+    };
+    run();
+
     return () => { unlisten.then(fn => fn()); };
-  }, []);
-
-  const handleInstallVbCable = async () => {
-    setInstallingVb(true);
-    setProgressMsg('正在下載 VB-Cable...');
-    try {
-      await invoke('install_vb_cable');
-      setProgressMsg('');
-      await detectDevices();
-    } catch (e: any) {
-      setProgressMsg(typeof e === 'string' ? e : (e.message || '安裝失敗'));
-    }
-    setInstallingVb(false);
-  };
-
-  const handleInstallObs = async () => {
-    setInstallingObs(true);
-    setProgressMsg('正在下載 OBS Studio...');
-    try {
-      await invoke('install_obs');
-      setProgressMsg('');
-      await detectDevices();
-    } catch (e: any) {
-      setProgressMsg(typeof e === 'string' ? e : (e.message || '安裝失敗'));
-    }
-    setInstallingObs(false);
-  };
-
-  const allReady = hasVbCable && hasVirtualCam;
-  const installing = installingVb || installingObs;
+  }, [onDone]);
 
   return (
     <div style={{
@@ -253,123 +224,43 @@ function SetupPage({ onDone }: { onDone: () => void }) {
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       color: '#e2e8f0',
     }}>
-      <div style={{
-        width: 480,
-        padding: '36px 32px',
-        borderRadius: 16,
-        background: '#1e293b',
-        boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
-      }}>
-        <h2 style={{ margin: '0 0 6px', fontSize: 20, fontWeight: 700 }}>首次使用 — 環境設定</h2>
-        <p style={{ margin: '0 0 24px', fontSize: 13, color: '#64748b' }}>
-          AI 分身需要虛擬音訊與攝影機裝置，點擊下方按鈕一鍵安裝。
-        </p>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 24 }}>
-          {/* Login — always done */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <IconCheck checked={true} />
-            <span style={{ flex: 1, fontSize: 14, color: '#a7f3d0' }}>已登入</span>
-          </div>
-
-          {/* VB-Cable */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <IconCheck checked={hasVbCable} />
-            <span style={{ flex: 1, fontSize: 14, color: hasVbCable ? '#a7f3d0' : '#e2e8f0' }}>
-              VB-Cable 虛擬麥克風
-            </span>
-            {!hasVbCable && (
-              <button
-                onClick={handleInstallVbCable}
-                disabled={installing}
-                style={{
-                  fontSize: 12, fontWeight: 700, color: '#fff',
-                  padding: '6px 16px', borderRadius: 6,
-                  border: 'none', cursor: installing ? 'not-allowed' : 'pointer',
-                  background: installingVb ? '#475569' : '#3b82f6',
-                  transition: 'background 0.2s',
-                }}
-              >
-                {installingVb ? '安裝中...' : '一鍵安裝'}
-              </button>
-            )}
-          </div>
-
-          {/* OBS */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <IconCheck checked={hasVirtualCam} />
-            <span style={{ flex: 1, fontSize: 14, color: hasVirtualCam ? '#a7f3d0' : '#e2e8f0' }}>
-              OBS Virtual Camera
-            </span>
-            {!hasVirtualCam && (
-              <button
-                onClick={handleInstallObs}
-                disabled={installing}
-                style={{
-                  fontSize: 12, fontWeight: 700, color: '#fff',
-                  padding: '6px 16px', borderRadius: 6,
-                  border: 'none', cursor: installing ? 'not-allowed' : 'pointer',
-                  background: installingObs ? '#475569' : '#3b82f6',
-                  transition: 'background 0.2s',
-                }}
-              >
-                {installingObs ? '安裝中...' : '一鍵安裝'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Progress message */}
-        {progressMsg && (
-          <div style={{
-            padding: '10px 14px', borderRadius: 8, marginBottom: 16,
-            background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)',
-            color: '#93c5fd', fontSize: 13,
-          }}>
-            {progressMsg}
-          </div>
+      <div style={{ textAlign: 'center', maxWidth: 400, padding: '0 20px' }}>
+        {!error ? (
+          <>
+            <div style={{
+              width: 60, height: 60,
+              border: '3px solid #3b82f6', borderTopColor: 'transparent',
+              borderRadius: 30, margin: '0 auto 20px',
+              animation: 'spin 1s linear infinite',
+            }} />
+            <h2 style={{ margin: '0 0 12px', fontSize: 20, fontWeight: 700 }}>首次啟動設定</h2>
+            <p style={{ margin: 0, color: '#94a3b8', fontSize: 14 }}>{progressMsg}</p>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </>
+        ) : (
+          <>
+            <div style={{
+              width: 60, height: 60, borderRadius: 30, margin: '0 auto 20px',
+              background: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </div>
+            <h2 style={{ margin: '0 0 12px', fontSize: 20, fontWeight: 700 }}>設定未完成</h2>
+            <p style={{ margin: '0 0 20px', color: '#f87171', fontSize: 14 }}>{error}</p>
+            <button
+              onClick={onDone}
+              style={{
+                padding: '10px 32px', borderRadius: 8,
+                border: 'none', background: '#475569',
+                color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              跳過，繼續使用
+            </button>
+          </>
         )}
-
-        {!allReady && !installing && (
-          <button
-            onClick={detectDevices}
-            disabled={checking}
-            style={{
-              width: '100%', padding: '10px 0', borderRadius: 8,
-              border: '1px solid #334155', background: 'transparent',
-              color: '#94a3b8', fontSize: 13, fontWeight: 600,
-              cursor: checking ? 'not-allowed' : 'pointer',
-              marginBottom: 16,
-            }}
-          >
-            {checking ? '偵測中...' : '重新偵測裝置'}
-          </button>
-        )}
-
-        <div style={{
-          padding: '12px 16px', borderRadius: 8,
-          background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)',
-          marginBottom: 24, fontSize: 12, color: '#93c5fd', lineHeight: 1.7,
-        }}>
-          <b>視訊軟體設定提示：</b><br />
-          1. 麥克風選擇「CABLE Output (VB-Audio Virtual Cable)」<br />
-          2. 攝影機選擇「OBS Virtual Camera」
-        </div>
-
-        <button
-          onClick={onDone}
-          disabled={installing}
-          style={{
-            width: '100%', padding: '12px 0', borderRadius: 10,
-            border: 'none',
-            background: allReady ? gradientBg : '#475569',
-            color: '#fff', fontSize: 15, fontWeight: 700,
-            cursor: installing ? 'not-allowed' : 'pointer',
-            boxShadow: allReady ? '0 4px 15px rgba(59,130,246,0.4)' : 'none',
-          }}
-        >
-          {allReady ? '環境就緒，繼續' : '跳過，稍後再安裝'}
-        </button>
       </div>
     </div>
   );
