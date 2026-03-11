@@ -112,6 +112,15 @@ func Migrate(db *sqlx.DB) error {
 			current_period_end TIMESTAMP,
 			created_at TIMESTAMP DEFAULT NOW()
 		)`,
+		// 密碼重設 Token 表
+		`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			token VARCHAR(255) UNIQUE NOT NULL,
+			expires_at TIMESTAMP NOT NULL,
+			used BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMP DEFAULT NOW()
+		)`,
 		// 索引
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)`,
@@ -121,6 +130,7 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_meeting_sessions_started_at ON meeting_sessions(started_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token)`,
 	}
 
 	for _, stmt := range statements {

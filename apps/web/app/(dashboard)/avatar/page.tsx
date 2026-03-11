@@ -9,9 +9,15 @@ import { toast } from '@/components/Toast';
 interface AvatarProfile {
   id: string;
   faceImageUrl: string | null;
+  face_image_url: string | null;
   voiceSampleUrl: string | null;
+  voice_sample_url: string | null;
+  voiceModelId: string | null;
+  voice_model_id: string | null;
   faceModelStatus: string;
+  face_model_status: string;
   voiceModelStatus: string;
+  voice_model_status: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -94,6 +100,19 @@ export default function AvatarPage() {
     },
   });
 
+  const resetDefaultsMutation = useMutation({
+    mutationFn: () => api.post('/api/v1/avatar/set-defaults'),
+    onSuccess: () => {
+      toast.success('已恢復為預設設定');
+      setFacePreview(null);
+      queryClient.invalidateQueries({ queryKey: ['avatar-profile'] });
+      queryClient.invalidateQueries({ queryKey: ['avatar-model-status'] });
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.error || '恢復預設失敗');
+    },
+  });
+
   const handleFaceSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -122,6 +141,14 @@ export default function AvatarPage() {
   const faceStatusInfo = statusLabels[faceStatus] || statusLabels.none;
   const voiceStatusInfo = statusLabels[voiceStatus] || statusLabels.none;
 
+  // 判斷是否使用預設值（支援 snake_case 和 camelCase 兩種格式）
+  const currentFaceUrl = profile?.face_image_url || profile?.faceImageUrl || null;
+  const currentVoiceModelId = profile?.voice_model_id || profile?.voiceModelId || null;
+  const isDefaultFace = currentFaceUrl === 'default' || !currentFaceUrl;
+  const isDefaultVoice = currentVoiceModelId === 'default' || !currentVoiceModelId;
+  const isCustomFace = currentFaceUrl !== null && currentFaceUrl !== 'default';
+  const isCustomVoice = currentVoiceModelId !== null && currentVoiceModelId !== 'default';
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -133,6 +160,46 @@ export default function AvatarPage() {
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-8 py-8">
       <h2 className="text-2xl font-bold mb-6">Avatar 設定</h2>
+
+      {/* 預設設定 */}
+      <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+        <h3 className="font-bold mb-4">預設設定</h3>
+
+        <div className="space-y-2 mb-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">聲音：</span>
+            <span className={isDefaultVoice ? 'text-blue-600 font-medium' : 'text-green-600 font-medium'}>
+              {isDefaultVoice ? '目前使用：預設 AI 聲音' : '目前使用：自訂聲音'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">頭像：</span>
+            <span className={isDefaultFace ? 'text-blue-600 font-medium' : 'text-green-600 font-medium'}>
+              {isDefaultFace ? '目前使用：預設 AI 頭像' : '目前使用：自訂照片'}
+            </span>
+          </div>
+        </div>
+
+        {(isCustomFace || isCustomVoice) && (
+          <button
+            onClick={() => {
+              if (window.confirm('確定要恢復為預設設定嗎？自訂的聲音和頭像設定將被覆蓋。')) {
+                resetDefaultsMutation.mutate();
+              }
+            }}
+            disabled={resetDefaultsMutation.isPending}
+            className="px-4 py-2 border border-blue-300 text-blue-600 rounded-lg hover:bg-blue-50 disabled:opacity-50 text-sm font-medium"
+          >
+            {resetDefaultsMutation.isPending ? '恢復中...' : '恢復預設'}
+          </button>
+        )}
+
+        {isDefaultFace && isDefaultVoice && (
+          <p className="text-sm text-gray-500">
+            目前已使用預設設定。你可以上傳自訂的臉部照片和聲音樣本來客製化你的 Avatar。
+          </p>
+        )}
+      </div>
 
       {/* 臉部照片 */}
       <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
@@ -150,15 +217,34 @@ export default function AvatarPage() {
         </p>
 
         {/* 預覽 */}
-        {(facePreview || profile?.faceImageUrl) && (
+        {facePreview ? (
           <div className="mb-4">
             <img
-              src={facePreview || profile?.faceImageUrl || ''}
+              src={facePreview}
               alt="臉部照片預覽"
               className="w-32 h-32 rounded-lg object-cover border"
             />
           </div>
-        )}
+        ) : isDefaultFace ? (
+          <div className="mb-4">
+            <div className="w-32 h-32 rounded-lg border bg-gradient-to-br from-blue-100 to-purple-100 flex items-center justify-center">
+              <div className="text-center">
+                <svg className="w-12 h-12 mx-auto text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                </svg>
+                <span className="text-xs text-blue-500 mt-1 block">預設頭像</span>
+              </div>
+            </div>
+          </div>
+        ) : isCustomFace ? (
+          <div className="mb-4">
+            <img
+              src={currentFaceUrl || ''}
+              alt="臉部照片預覽"
+              className="w-32 h-32 rounded-lg object-cover border"
+            />
+          </div>
+        ) : null}
 
         <input
           ref={faceInputRef}

@@ -294,22 +294,53 @@ func (h *BillingHandler) GetStatus(c *fiber.Ctx) error {
 		})
 	}
 
-	// 計算今日使用量（免費方案用）
-	var todayUsage int64
-	h.db.Get(&todayUsage,
-		`SELECT COALESCE(SUM(duration_seconds), 0)
+	// 計算本月使用量
+	var monthSessions int64
+	h.db.Get(&monthSessions,
+		`SELECT COUNT(*)
 		 FROM meeting_sessions
-		 WHERE user_id = $1 AND started_at >= CURRENT_DATE AND ended_at IS NOT NULL`,
+		 WHERE user_id = $1
+		   AND started_at >= date_trunc('month', CURRENT_DATE)`,
 		userID,
 	)
 
-	result := fiber.Map{
-		"plan":              plan,
-		"today_usage_seconds": todayUsage,
+	var monthDurationSeconds int64
+	h.db.Get(&monthDurationSeconds,
+		`SELECT COALESCE(SUM(duration_seconds), 0)
+		 FROM meeting_sessions
+		 WHERE user_id = $1
+		   AND started_at >= date_trunc('month', CURRENT_DATE)
+		   AND ended_at IS NOT NULL`,
+		userID,
+	)
+
+	var monthResponses int64
+	h.db.Get(&monthResponses,
+		`SELECT COALESCE(SUM(total_responses), 0)
+		 FROM meeting_sessions
+		 WHERE user_id = $1
+		   AND started_at >= date_trunc('month', CURRENT_DATE)`,
+		userID,
+	)
+
+	totalMinutes := monthDurationSeconds / 60
+
+	status := "active"
+	var currentPeriodEnd *time.Time
+	if err != sql.ErrNoRows {
+		status = sub.Status
+		currentPeriodEnd = sub.CurrentPeriodEnd
 	}
 
-	if err != sql.ErrNoRows {
-		result["subscription"] = sub
+	result := fiber.Map{
+		"plan":               plan,
+		"status":             status,
+		"current_period_end": currentPeriodEnd,
+		"usage_this_month": fiber.Map{
+			"sessions":      monthSessions,
+			"total_minutes":  totalMinutes,
+			"suggestions":   monthResponses,
+		},
 	}
 
 	return c.JSON(fiber.Map{

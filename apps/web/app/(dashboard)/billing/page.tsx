@@ -9,8 +9,12 @@ import { toast } from '@/components/Toast';
 interface BillingStatus {
   plan: string;
   status: string;
-  currentPeriodEnd: string | null;
-  cancelAtPeriodEnd: boolean;
+  current_period_end: string | null;
+  usage_this_month: {
+    sessions: number;
+    total_minutes: number;
+    suggestions: number;
+  };
 }
 
 const plans = [
@@ -18,26 +22,20 @@ const plans = [
     key: 'free',
     name: '免費',
     price: '$0',
-    features: ['模式1（每天30分鐘）', '預設 Avatar', '僅 Claude'],
-  },
-  {
-    key: 'starter',
-    name: '入門',
-    price: '$15',
-    features: ['模式1 完整版', '自訂 AI 個性', '選擇模型'],
+    features: ['每日 30 分鐘會議時間', '基本 AI 個性', '標準畫質'],
   },
   {
     key: 'pro',
     name: '專業',
-    price: '$39',
-    features: ['模式1+2', '上傳臉/聲音', '換背景', '優先佇列'],
+    price: '$29',
+    features: ['無限會議時間', '自訂 AI 個性', '高畫質串流', '語音克隆', '優先技術支援'],
     popular: true,
   },
   {
-    key: 'ultimate',
-    name: '旗艦',
-    price: '$79',
-    features: ['模式1+2+3', '換裝', '所有模型', '最低延遲', 'API'],
+    key: 'enterprise',
+    name: '企業',
+    price: '$99',
+    features: ['Pro 方案所有功能', '多人同時使用', 'API 存取', '自訂模型訓練', '專屬客戶經理', 'SLA 保證'],
   },
 ];
 
@@ -51,11 +49,11 @@ export default function BillingPage() {
 
   const subscribeMutation = useMutation({
     mutationFn: (planKey: string) =>
-      api.post('/api/v1/billing/subscribe', { plan: planKey }),
+      api.post('/api/v1/billing/subscribe', { plan_id: planKey }),
     onSuccess: (data) => {
       // Stripe checkout URL
-      if (data?.data?.url) {
-        window.location.href = data.data.url;
+      if (data?.data?.checkout_url) {
+        window.location.href = data.data.checkout_url;
       } else {
         toast.success('訂閱處理中...');
       }
@@ -78,8 +76,8 @@ export default function BillingPage() {
   const portalMutation = useMutation({
     mutationFn: () => api.post('/api/v1/billing/portal'),
     onSuccess: (data) => {
-      if (data?.data?.url) {
-        window.location.href = data.data.url;
+      if (data?.data?.portal_url) {
+        window.location.href = data.data.portal_url;
       }
     },
     onError: (err: any) => {
@@ -114,11 +112,11 @@ export default function BillingPage() {
                   )}
                 </span>
               </p>
-              {billing.currentPeriodEnd && (
+              {billing.current_period_end && (
                 <p className="text-sm text-gray-500 mt-1">
-                  {billing.cancelAtPeriodEnd
+                  {billing.status === 'canceling'
                     ? '將於本期結束後取消'
-                    : `下次續費：${new Date(billing.currentPeriodEnd).toLocaleDateString('zh-TW')}`}
+                    : `下次續費：${new Date(billing.current_period_end).toLocaleDateString('zh-TW')}`}
                 </p>
               )}
             </div>
@@ -130,7 +128,7 @@ export default function BillingPage() {
               >
                 管理帳單
               </button>
-              {!billing.cancelAtPeriodEnd && (
+              {billing.status !== 'canceling' && (
                 <button
                   onClick={() => {
                     if (window.confirm('確定要取消訂閱嗎？')) {
@@ -151,7 +149,7 @@ export default function BillingPage() {
       <p className="text-gray-600 mb-6">選擇最適合你的方案</p>
 
       {/* 方案卡片 */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
         {plans.map((plan) => {
           const isCurrent = plan.key === currentPlan;
           return (

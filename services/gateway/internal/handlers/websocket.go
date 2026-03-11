@@ -184,6 +184,11 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			userID,
 		)
 
+		// 如果沒有設定 voice_id，使用預設聲音，確保 Mode 2 TTS 總是可用
+		if voiceID == "" {
+			voiceID = "default"
+		}
+
 		// 發送連線成功訊息
 		writeWSMessage(conn, WSMessage{
 			Type: "connected",

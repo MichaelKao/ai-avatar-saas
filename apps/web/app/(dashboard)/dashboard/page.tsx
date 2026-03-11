@@ -8,19 +8,19 @@ import Link from 'next/link';
 
 interface SessionHistoryItem {
   id: string;
-  startTime: string;
-  endTime: string | null;
-  durationSeconds: number;
-  suggestionsCount: number;
+  started_at: string;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  total_responses: number;
 }
 
 interface BillingStatus {
   plan: string;
   status: string;
-  currentPeriodEnd: string | null;
-  usageThisMonth: {
+  current_period_end: string | null;
+  usage_this_month: {
     sessions: number;
-    totalMinutes: number;
+    total_minutes: number;
     suggestions: number;
   };
 }
@@ -35,10 +35,10 @@ export default function DashboardPage() {
 
   const { data: sessions, isLoading: sessionsLoading } = useQuery<SessionHistoryItem[]>({
     queryKey: ['session-history'],
-    queryFn: () => api.get('/api/v1/session/history').then((r) => r.data || []),
+    queryFn: () => api.get('/api/v1/session/history').then((r) => r.data?.sessions || []),
   });
 
-  const usage = billing?.usageThisMonth;
+  const usage = billing?.usage_this_month;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-8 py-8">
@@ -108,7 +108,7 @@ export default function DashboardPage() {
             </div>
             <div className="text-center p-3">
               <div className="text-3xl font-bold text-green-600">
-                {usage?.totalMinutes ?? 0} 分鐘
+                {usage?.total_minutes ?? 0} 分鐘
               </div>
               <div className="text-sm text-gray-500">總使用時間</div>
             </div>
@@ -149,18 +149,18 @@ export default function DashboardPage() {
               <tbody>
                 {sessions.slice(0, 10).map((s) => (
                   <tr key={s.id} className="border-b last:border-b-0">
-                    <td className="py-3 pr-4">{formatDate(s.startTime)}</td>
-                    <td className="py-3 pr-4">{Math.round(s.durationSeconds / 60)}</td>
-                    <td className="py-3 pr-4">{s.suggestionsCount}</td>
+                    <td className="py-3 pr-4">{formatDate(s.started_at)}</td>
+                    <td className="py-3 pr-4">{Math.round((s.duration_seconds ?? 0) / 60)}</td>
+                    <td className="py-3 pr-4">{s.total_responses}</td>
                     <td className="py-3">
                       <span
                         className={`inline-block text-xs px-2 py-0.5 rounded-full ${
-                          s.endTime
+                          s.ended_at
                             ? 'bg-gray-100 text-gray-600'
                             : 'bg-green-100 text-green-700'
                         }`}
                       >
-                        {s.endTime ? '已結束' : '進行中'}
+                        {s.ended_at ? '已結束' : '進行中'}
                       </span>
                     </td>
                   </tr>

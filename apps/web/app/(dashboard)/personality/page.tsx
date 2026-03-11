@@ -9,25 +9,27 @@ import { toast } from '@/components/Toast';
 interface Personality {
   id: string;
   name: string;
-  systemPrompt: string;
-  model: string;
+  system_prompt: string;
+  llm_model: string;
   temperature: number;
-  isDefault: boolean;
-  createdAt: string;
+  is_default: boolean;
+  created_at: string;
 }
 
 interface PersonalityForm {
   name: string;
-  systemPrompt: string;
-  model: string;
+  system_prompt: string;
+  llm_model: string;
   temperature: number;
+  language: string;
 }
 
 const defaultForm: PersonalityForm = {
   name: '',
-  systemPrompt: '',
-  model: 'claude-sonnet-4-20250514',
+  system_prompt: '',
+  llm_model: 'claude-sonnet-4-20250514',
   temperature: 0.7,
+  language: 'zh-TW',
 };
 
 const modelOptions = [
@@ -105,16 +107,17 @@ export default function PersonalityPage() {
     setEditingId(p.id);
     setForm({
       name: p.name,
-      systemPrompt: p.systemPrompt,
-      model: p.model,
+      system_prompt: p.system_prompt,
+      llm_model: p.llm_model,
       temperature: p.temperature,
+      language: 'zh-TW',
     });
     setShowForm(true);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim() || !form.systemPrompt.trim()) {
+    if (!form.name.trim() || !form.system_prompt.trim()) {
       toast.error('請填寫名稱和系統提示詞');
       return;
     }
@@ -169,9 +172,9 @@ export default function PersonalityPage() {
                 系統提示詞
               </label>
               <textarea
-                value={form.systemPrompt}
+                value={form.system_prompt}
                 onChange={(e) =>
-                  setForm({ ...form, systemPrompt: e.target.value })
+                  setForm({ ...form, system_prompt: e.target.value })
                 }
                 rows={5}
                 className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -184,8 +187,8 @@ export default function PersonalityPage() {
                 AI 模型
               </label>
               <select
-                value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                value={form.llm_model}
+                onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
                 className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 {modelOptions.map((opt) => (
@@ -260,20 +263,20 @@ export default function PersonalityPage() {
             <div
               key={p.id}
               className={`bg-white rounded-xl shadow-sm border p-5 ${
-                p.isDefault ? 'border-blue-300 ring-1 ring-blue-200' : ''
+                p.is_default ? 'border-blue-300 ring-1 ring-blue-200' : ''
               }`}
             >
               <div className="flex items-start justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <h4 className="font-bold">{escapeHtml(p.name)}</h4>
-                  {p.isDefault && (
+                  {p.is_default && (
                     <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">
                       預設
                     </span>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  {!p.isDefault && (
+                  {!p.is_default && (
                     <button
                       onClick={() => setDefaultMutation.mutate(p.id)}
                       disabled={setDefaultMutation.isPending}
@@ -306,14 +309,14 @@ export default function PersonalityPage() {
                 </div>
               </div>
               <p className="text-sm text-gray-600 mb-2 line-clamp-2">
-                {escapeHtml(p.systemPrompt)}
+                {escapeHtml(p.system_prompt)}
               </p>
               <div className="flex gap-4 text-xs text-gray-500">
                 <span>
                   模型:{' '}
                   {escapeHtml(
-                    modelOptions.find((m) => m.value === p.model)?.label ||
-                      p.model
+                    modelOptions.find((m) => m.value === p.llm_model)?.label ||
+                      p.llm_model
                   )}
                 </span>
                 <span>溫度: {p.temperature}</span>

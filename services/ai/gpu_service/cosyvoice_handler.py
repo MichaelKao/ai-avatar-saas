@@ -60,8 +60,34 @@ class CosyVoiceHandler:
         self.voice_profiles[voice_id] = str(profile_path)
         logger.info(f"聲音檔案已建立: {voice_id}")
 
+    def synthesize_default(self, text: str, output_path: str):
+        """使用內建預設聲音進行文字轉語音（不需要克隆的聲音檔案）"""
+        import torchaudio
+
+        # 使用 CosyVoice2 的 inference_sft 方法搭配內建 speaker
+        # CosyVoice2 內建 speaker 包含 "中文女"、"中文男"、"英文女"、"英文男" 等
+        default_speaker = "中文女"
+
+        output = self.model.inference_sft(
+            tts_text=text,
+            spk_id=default_speaker,
+            stream=False,
+        )
+
+        # 儲存輸出
+        for result in output:
+            tts_speech = result["tts_speech"]
+            torchaudio.save(output_path, tts_speech, 22050)
+            break
+
+        logger.info(f"預設聲音合成完成: {output_path}")
+
     def synthesize(self, text: str, voice_id: str, output_path: str):
         """文字轉語音"""
+        # 如果 voice_id 為 "default"，使用預設聲音
+        if voice_id == "default":
+            return self.synthesize_default(text, output_path)
+
         profile_path = self.voice_profiles.get(voice_id)
         if not profile_path:
             raise ValueError(f"找不到聲音檔案: {voice_id}")

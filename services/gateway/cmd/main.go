@@ -85,6 +85,8 @@ func main() {
 	authGroup.Post("/register", authHandler.Register)
 	authGroup.Post("/login", authHandler.Login)
 	authGroup.Post("/refresh", authHandler.RefreshToken)
+	authGroup.Post("/forgot-password", authHandler.ForgotPassword)
+	authGroup.Post("/reset-password", authHandler.ResetPassword)
 
 	// Stripe Webhook（不需要 JWT，但驗證 Stripe 簽名）
 	webhookHandler := handlers.NewWebhookHandler(db)
@@ -93,6 +95,10 @@ func main() {
 	// 需要認證的路由
 	protected := api.Group("", auth.JWTMiddleware())
 
+	// 認證相關（需要 JWT）
+	protected.Put("/auth/change-password", authHandler.ChangePassword)
+	protected.Delete("/auth/account", authHandler.DeleteAccount)
+
 	// Avatar 設定檔路由
 	avatarHandler := handlers.NewAvatarHandler(db)
 	avatarGroup := protected.Group("/avatar")
@@ -100,6 +106,7 @@ func main() {
 	avatarGroup.Post("/upload-face", avatarHandler.UploadFace)
 	avatarGroup.Post("/upload-voice", avatarHandler.UploadVoice)
 	avatarGroup.Get("/model-status", avatarHandler.GetModelStatus)
+	avatarGroup.Post("/set-defaults", avatarHandler.SetDefaults)
 	avatarGroup.Delete("/profile", avatarHandler.DeleteProfile)
 
 	// AI 個性設定路由

@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     global cosyvoice_model, wav2lip_model
 
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
-    logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
+    logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
 
     # 載入 CosyVoice 模型
     try:
@@ -78,7 +78,7 @@ async def health():
         "status": "ok",
         "service": "gpu-service",
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",
-        "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_mem / 1e9, 1) if torch.cuda.is_available() else 0,
+        "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1) if torch.cuda.is_available() else 0,
         "cosyvoice_loaded": cosyvoice_model is not None,
         "wav2lip_loaded": wav2lip_model is not None,
     }
@@ -115,13 +115,17 @@ async def clone_voice(voice_sample: UploadFile = File(...)):
 
 @app.post("/api/v1/tts/synthesize")
 async def synthesize_speech(request: TTSRequest):
-    """文字 → 語音（使用克隆的聲音）"""
+    """文字 → 語音（使用克隆的聲音或預設聲音）"""
     if cosyvoice_model is None:
         raise HTTPException(503, "CosyVoice 模型未載入")
 
     try:
         output_path = OUTPUT_DIR / f"tts_{uuid.uuid4()}.wav"
-        cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
+        if request.voice_id == "default":
+            # 使用內建預設聲音，不需要克隆的聲音檔案
+            cosyvoice_model.synthesize_default(request.text, str(output_path))
+        else:
+            cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
         return FileResponse(str(output_path), media_type="audio/wav")
     except Exception as e:
         raise HTTPException(500, f"語音合成失敗: {str(e)}")

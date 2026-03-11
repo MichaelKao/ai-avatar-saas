@@ -48,12 +48,14 @@ func (h *AvatarHandler) GetProfile(c *fiber.Ctx) error {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// 自動建立新的 Avatar 設定檔
+			// 自動建立新的 Avatar 設定檔（使用預設值）
+			defaultFace := "default"
+			defaultVoice := "default"
 			err = h.db.QueryRowx(
-				`INSERT INTO avatar_profiles (user_id)
-				 VALUES ($1)
+				`INSERT INTO avatar_profiles (user_id, face_image_url, voice_model_id, face_model_status, voice_model_status)
+				 VALUES ($1, $2, $3, 'ready', 'ready')
 				 RETURNING *`,
-				userID,
+				userID, defaultFace, defaultVoice,
 			).StructScan(&profile)
 
 			if err != nil {
@@ -314,6 +316,65 @@ func (h *AvatarHandler) DeleteProfile(c *fiber.Ctx) error {
 		"data": fiber.Map{
 			"message": "Avatar 設定檔已刪除",
 		},
+		"error": nil,
+	})
+}
+
+// SetDefaults 將用戶的 Avatar 設定恢復為預設值
+func (h *AvatarHandler) SetDefaults(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(string)
+
+	defaultFace := "default"
+	defaultVoice := "default"
+
+	// 嘗試更新現有設定檔
+	result, err := h.db.Exec(
+		`UPDATE avatar_profiles
+		 SET face_image_url = $1, voice_model_id = $2,
+		     face_model_status = 'ready', voice_model_status = 'ready',
+		     updated_at = NOW()
+		 WHERE user_id = $3 AND deleted_at IS NULL`,
+		defaultFace, defaultVoice, userID,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"data":  nil,
+			"error": "恢復預設值失敗",
+		})
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		// 設定檔不存在，建立新的並使用預設值
+		_, insertErr := h.db.Exec(
+			`INSERT INTO avatar_profiles (user_id, face_image_url, voice_model_id, face_model_status, voice_model_status)
+			 VALUES ($1, $2, $3, 'ready', 'ready')`,
+			userID, defaultFace, defaultVoice,
+		)
+		if insertErr != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"data":  nil,
+				"error": "建立預設 Avatar 設定檔失敗",
+			})
+		}
+	}
+
+	// 回傳更新後的設定檔
+	var profile AvatarProfile
+	err = h.db.Get(&profile,
+		`SELECT * FROM avatar_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"data":  nil,
+			"error": "取得更新後的設定檔失敗",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"data":  profile,
 		"error": nil,
 	})
 }
