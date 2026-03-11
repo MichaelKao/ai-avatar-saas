@@ -26,14 +26,26 @@ logger = logging.getLogger("llm_service")
 # 可用模型清單
 AVAILABLE_MODELS = [
     {
+        "id": "claude-opus-4-6",
+        "name": "Claude Opus 4.6",
+        "provider": "anthropic",
+        "description": "Anthropic 最強模型，最深度思考與推理能力",
+    },
+    {
+        "id": "claude-sonnet-4-6",
+        "name": "Claude Sonnet 4.6",
+        "provider": "anthropic",
+        "description": "Anthropic 高效能模型，速度與品質平衡",
+    },
+    {
         "id": "claude-sonnet-4-20250514",
         "name": "Claude Sonnet 4",
         "provider": "anthropic",
-        "description": "Anthropic 高效能模型，適合多數對話場景",
+        "description": "Anthropic 上一代高效能模型",
     },
     {
-        "id": "claude-3-5-haiku-20241022",
-        "name": "Claude 3.5 Haiku",
+        "id": "claude-haiku-4-5-20251001",
+        "name": "Claude Haiku 4.5",
         "provider": "anthropic",
         "description": "Anthropic 快速模型，適合簡短回應",
     },
@@ -78,7 +90,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     """對話請求"""
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-6"
     system_prompt: str = "你是一位專業的商業顧問，回答簡潔有力，使用繁體中文。"
     messages: list[dict]
     temperature: float = 0.7
@@ -163,7 +175,7 @@ class GenerateRequest(BaseModel):
     session_id: str = ""
     user_id: str = ""
     system_prompt: str = "你是一位專業的商業顧問，回答簡潔有力，使用繁體中文。"
-    llm_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = "claude-opus-4-6"
     temperature: float = 0.7
     language: str = "zh-TW"
 

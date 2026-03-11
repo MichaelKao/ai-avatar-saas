@@ -173,8 +173,8 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 
 		if err != nil {
 			// 使用預設值
-			personality.SystemPrompt = "你是一位專業的 AI 會議助手，請用繁體中文回答。"
-			personality.LLMModel = "claude-sonnet-4-20250514"
+			personality.SystemPrompt = "你是一位聰明、有深度的 AI 會議助手。你正在替用戶參加視訊會議，需要自然地回應對方的問題和對話。回答要像真人一樣自然流暢，不要太制式。根據對話內容給出有洞見的回應，避免空泛的客套話。使用繁體中文，語氣專業但親切。"
+			personality.LLMModel = "claude-opus-4-6"
 			personality.Temperature = 0.7
 			personality.Language = "zh-TW"
 		}
