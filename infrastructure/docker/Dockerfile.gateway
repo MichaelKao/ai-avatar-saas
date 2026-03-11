@@ -1,0 +1,25 @@
+# Go Gateway Dockerfile
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# 安裝依賴
+COPY services/gateway/go.mod services/gateway/go.sum ./
+RUN go mod download
+
+# 複製原始碼
+COPY services/gateway/ .
+
+# 編譯
+RUN CGO_ENABLED=0 GOOS=linux go build -o /gateway cmd/main.go
+
+# 執行階段
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates
+
+COPY --from=builder /gateway /gateway
+
+EXPOSE 8080
+
+CMD ["/gateway"]
