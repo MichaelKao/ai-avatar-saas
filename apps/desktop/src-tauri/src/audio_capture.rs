@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 /// AI 正在播放語音時暫停擷取（避免回饋迴圈）
 static PLAYBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 播放結束後清空 buffer（丟棄殘留音訊）
+static FLUSH_BUFFER: AtomicBool = AtomicBool::new(false);
 
 /// Audio chunk - 16kHz 16-bit mono PCM
 pub struct AudioChunk {
@@ -51,6 +53,11 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
                 // AI 播放語音中 → 丟棄音訊，避免回饋迴圈
                 if PLAYBACK_ACTIVE.load(Ordering::SeqCst) {
                     return;
+                }
+
+                // 播放結束後清空 buffer（丟棄播放前殘留的音訊片段）
+                if FLUSH_BUFFER.swap(false, Ordering::SeqCst) {
+                    buffer.clear();
                 }
 
                 // Mix to mono
@@ -131,6 +138,11 @@ pub fn is_capturing() -> bool {
 /// 設定播放狀態（播放中暫停擷取，避免回饋迴圈）
 pub fn set_playback_active(active: bool) {
     PLAYBACK_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// 清空擷取 buffer（播放結束後呼叫，丟棄可能包含 AI 語音的殘留資料）
+pub fn flush_buffer() {
+    FLUSH_BUFFER.store(true, Ordering::SeqCst);
 }
 
 /// Simple linear resampling
