@@ -68,29 +68,9 @@ const IconCamera = () => (
 // AvatarWindow — 獨立無邊框視窗，只顯示 Avatar 影片（給 OBS 擷取用）
 // ---------------------------------------------------------------------------
 function AvatarWindow() {
-  const webcamRef = useRef<HTMLVideoElement | null>(null);
   const avatarRef = useRef<HTMLVideoElement | null>(null);
   const [showAvatar, setShowAvatar] = useState(false);
   const [faceSnapshot, setFaceSnapshot] = useState('');
-  const [webcamReady, setWebcamReady] = useState(false);
-
-  // 啟動 webcam 作為預設畫面（OBS 擷取此視窗 → 對方看到你的真實臉）
-  useEffect(() => {
-    let stream: MediaStream | null = null;
-    navigator.mediaDevices.getUserMedia({
-      video: { width: 320, height: 240, facingMode: 'user' },
-    }).then((s) => {
-      stream = s;
-      if (webcamRef.current) {
-        webcamRef.current.srcObject = s;
-        webcamRef.current.play().catch(() => {});
-        setWebcamReady(true);
-      }
-    }).catch(() => {
-      // webcam 不可用（可能被停用了），用靜態臉部截圖
-    });
-    return () => { stream?.getTracks().forEach(t => t.stop()); };
-  }, []);
 
   // 接收臉部截圖（webcam 不可用時的備用畫面）
   useEffect(() => {
@@ -137,15 +117,8 @@ function AvatarWindow() {
 
   return (
     <div style={containerStyle}>
-      {/* 底層：webcam 即時畫面（鏡像，看起來自然） */}
-      <video
-        ref={webcamRef}
-        style={{ ...fullCover, transform: 'scaleX(-1)', display: webcamReady ? 'block' : 'none' }}
-        playsInline
-        muted
-      />
-      {/* 備用：靜態臉部截圖（webcam 不可用時） */}
-      {!webcamReady && faceSnapshot && (
+      {/* 底層：啟動時擷取的臉部截圖（穩定可靠，不受攝影機停用影響） */}
+      {faceSnapshot && (
         <img
           src={`data:image/jpeg;base64,${faceSnapshot}`}
           style={{ ...fullCover, transform: 'scaleX(-1)' }}
@@ -161,7 +134,7 @@ function AvatarWindow() {
         onError={handleAvatarEnded}
       />
       {/* 無任何畫面時顯示提示 */}
-      {!webcamReady && !faceSnapshot && (
+      {!faceSnapshot && (
         <div style={{
           ...fullCover, display: 'flex', alignItems: 'center', justifyContent: 'center',
           color: '#475569', fontSize: 14, textAlign: 'center',
@@ -657,7 +630,8 @@ function MainApp() {
 
         // 開啟 Avatar 視窗（內建 webcam 畫面，給 OBS 擷取用）
         await invoke('open_avatar_window');
-        await new Promise(r => setTimeout(r, 800));
+        // 等待 Avatar 視窗完全載入（確保事件監聽器已就緒）
+        await new Promise(r => setTimeout(r, 1500));
 
         // 傳送臉部截圖到 Avatar 視窗（webcam 不可用時的備用畫面）
         if (faceBase64) {
