@@ -174,7 +174,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		if err != nil {
 			// 使用預設值
 			personality.SystemPrompt = "你是一位聰明的 AI 會議助手，正在替用戶參加視訊會議。規則：1)直接回答問題，簡潔有力 2)絕對不要說「再見」「下次見」「期待下次」或任何結束對話的話 3)如果聽不懂就請對方再說一次 4)忽略無意義的語音辨識雜訊（亂碼、日文片段等）5)使用繁體中文，語氣自然親切。"
-			personality.LLMModel = "claude-opus-4-6"
+			personality.LLMModel = "claude-sonnet-4-6"
 			personality.Temperature = 0.7
 			personality.Language = "zh-TW"
 		}
@@ -322,20 +322,24 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				} else {
 					// 無自訂聲音：用 Edge TTS（快速，<1 秒）
 					audioURL, ttsErr = callFastTTS(aiResponse.Text, voiceGender)
-					// Mode 3: Edge TTS 音訊 + Wav2Lip 臉部動畫
+					// Mode 3: Wav2Lip 背景執行，不阻塞音訊回覆
 					if ttsErr == nil && audioURL != "" && msg.Mode == 3 {
-						videoURL, wavErr := callWav2LipFromAudio(audioURL, faceImageURL, sessionFaceBase64)
-						if wavErr != nil {
-							log.Printf("Wav2Lip 失敗（仍會播放音訊）: %v", wavErr)
-						} else if videoURL != "" {
-							writeWSMessage(conn, WSMessage{
-								Type: "avatar_video",
-								Data: fiber.Map{
-									"video_url":  videoURL,
-									"session_id": sessionID,
-								},
-							})
-						}
+						go func(aURL, fURL, fBase64, sid string) {
+							vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
+							if wErr != nil {
+								log.Printf("Wav2Lip 背景失敗: %v", wErr)
+								return
+							}
+							if vURL != "" {
+								writeWSMessage(conn, WSMessage{
+									Type: "avatar_video",
+									Data: fiber.Map{
+										"video_url":  vURL,
+										"session_id": sid,
+									},
+								})
+							}
+						}(audioURL, faceImageURL, sessionFaceBase64, sessionID)
 					}
 				}
 

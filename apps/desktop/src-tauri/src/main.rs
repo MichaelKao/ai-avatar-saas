@@ -89,11 +89,11 @@ fn get_status() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// STT 防抖緩衝區 — 累積 STT 文字，等待 3 秒無新結果後才送出
+/// STT 防抖緩衝區 — 累積 STT 文字，等待 2 秒無新結果後才送出
 struct DebounceState {
     /// 累積的 STT 文字
     buffer: String,
-    /// 正在等待的延遲傳送任務（3 秒計時器）
+    /// 正在等待的延遲傳送任務（2 秒計時器）
     pending_timer: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -148,7 +148,7 @@ async fn start_auto_mode(
                         use tauri::Emitter;
                         app_clone.emit("stt-result", &text).ok();
 
-                        // 防抖機制：累積文字，重設 3 秒計時器
+                        // 防抖機制：累積文字，重設 2 秒計時器
                         let mut state = debounce_state().lock().await;
 
                         // 將新的 STT 文字加入緩衝區（用空格分隔）
@@ -162,11 +162,11 @@ async fn start_auto_mode(
                             handle.abort();
                         }
 
-                        // 啟動新的 3 秒延遲傳送任務
+                        // 啟動新的 2 秒延遲傳送任務（縮短等待時間，加快回應速度）
                         let send_mode = mode;
                         let timer_handle = tokio::spawn(async move {
-                            // 等待 3 秒，若期間沒有新的 STT 結果就送出
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            // 等待 2 秒，若期間沒有新的 STT 結果就送出
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                             // 取出緩衝區內容並清空
                             let accumulated_text = {

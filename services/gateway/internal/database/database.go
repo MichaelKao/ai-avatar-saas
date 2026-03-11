@@ -63,7 +63,7 @@ func Migrate(db *sqlx.DB) error {
 			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
 			name VARCHAR(255) NOT NULL,
 			system_prompt TEXT NOT NULL,
-			llm_model VARCHAR(100) DEFAULT 'claude-opus-4-6',
+			llm_model VARCHAR(100) DEFAULT 'claude-sonnet-4-6',
 			temperature DECIMAL(3,2) DEFAULT 0.7,
 			language VARCHAR(50) DEFAULT 'zh-TW',
 			is_default BOOLEAN DEFAULT FALSE,

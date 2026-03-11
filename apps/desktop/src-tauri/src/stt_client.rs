@@ -14,9 +14,11 @@ pub async fn transcribe(audio_data: &[i16], sample_rate: u32, gpu_url: &str) -> 
         .map_err(|e| format!("MIME error: {}", e))?;
 
     // 指定語言為中文，避免 Whisper 自動偵測把中文聽成英文/日文
+    // 加入 initial_prompt 引導 Whisper 辨識常見會議用語，提升準確度
     let form = multipart::Form::new()
         .part("audio", part)
-        .text("language", "zh");
+        .text("language", "zh")
+        .text("initial_prompt", "會議討論、Spring Boot、技術架構、商業計畫、專案管理");
 
     let resp = client
         .post(format!("{}/api/v1/stt/transcribe", gpu_url))

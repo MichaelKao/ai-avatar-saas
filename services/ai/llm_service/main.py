@@ -90,7 +90,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     """對話請求"""
-    model: str = "claude-opus-4-6"
+    model: str = "claude-sonnet-4-6"
     system_prompt: str = "你是一位專業的商業顧問，回答簡潔有力，使用繁體中文。"
     messages: list[dict]
     temperature: float = 0.7
@@ -175,7 +175,7 @@ class GenerateRequest(BaseModel):
     session_id: str = ""
     user_id: str = ""
     system_prompt: str = "你是一位專業的商業顧問，回答簡潔有力，使用繁體中文。"
-    llm_model: str = "claude-opus-4-6"
+    llm_model: str = "claude-sonnet-4-6"
     temperature: float = 0.7
     language: str = "zh-TW"
 

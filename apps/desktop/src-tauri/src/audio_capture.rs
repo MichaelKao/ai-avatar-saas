@@ -38,7 +38,7 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
 
     std::thread::spawn(move || {
         let mut buffer: Vec<f32> = Vec::new();
-        let chunk_size = (sample_rate as f32 * 1.5) as usize; // 1.5 秒（加速回應速度）
+        let chunk_size = (sample_rate as f32 * 3.0) as usize; // 3 秒（給 Whisper 更多上下文，提升辨識準確度）
         // 跳過前 1 秒的音訊（避免擷取到啟動前的殘留聲音）
         let skip_samples = sample_rate as usize;
         let mut skipped: usize = 0;
@@ -73,7 +73,7 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
 
                 buffer.extend_from_slice(&mono);
 
-                // Send chunk every 1.5 seconds
+                // 每 3 秒送出一個音訊片段
                 if buffer.len() >= chunk_size {
                     // Resample to 16kHz if needed
                     let resampled = if sample_rate != 16000 {
