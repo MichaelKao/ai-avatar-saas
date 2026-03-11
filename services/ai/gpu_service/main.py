@@ -9,7 +9,9 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+import numpy as np
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,15 +31,19 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))
 for d in [MODEL_DIR, UPLOAD_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Whisper STT 設定
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+
 # 全域模型變數
 cosyvoice_model = None
 wav2lip_model = None
+whisper_model = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """啟動時載入模型"""
-    global cosyvoice_model, wav2lip_model
+    global cosyvoice_model, wav2lip_model, whisper_model
 
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
@@ -57,6 +63,21 @@ async def lifespan(app: FastAPI):
         logger.info("Wav2Lip 模型載入完成")
     except Exception as e:
         logger.warning(f"Wav2Lip 載入失敗（可能尚未安裝）: {e}")
+
+    # 載入 Whisper STT 模型（faster-whisper）
+    try:
+        from faster_whisper import WhisperModel
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE,
+            device=device,
+            compute_type=compute_type,
+            download_root=str(MODEL_DIR / "whisper"),
+        )
+        logger.info(f"Whisper ({WHISPER_MODEL_SIZE}) 模型載入完成 (device={device}, compute={compute_type})")
+    except Exception as e:
+        logger.warning(f"Whisper 載入失敗（可能尚未安裝 faster-whisper）: {e}")
 
     yield
     logger.info("GPU Service 關閉")
@@ -83,6 +104,8 @@ async def health():
         "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1) if torch.cuda.is_available() else 0,
         "cosyvoice_loaded": cosyvoice_model is not None,
         "wav2lip_loaded": wav2lip_model is not None,
+        "whisper_loaded": whisper_model is not None,
+        "whisper_model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
     }
 
 
@@ -147,6 +170,123 @@ async def synthesize_speech_stream(request: TTSRequest):
             logger.error(f"串流合成失敗: {e}")
 
     return StreamingResponse(generate(), media_type="audio/wav")
+
+
+# ============== 語音識別 STT ==============
+
+@app.post("/api/v1/stt/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """上傳音訊檔案（WAV/WebM）→ 文字轉錄"""
+    if whisper_model is None:
+        raise HTTPException(503, "Whisper 模型未載入")
+
+    # 驗證檔案格式
+    allowed_types = {"audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg"}
+    allowed_extensions = {".wav", ".webm", ".ogg"}
+    filename = audio.filename or ""
+    ext = Path(filename).suffix.lower()
+
+    if audio.content_type not in allowed_types and ext not in allowed_extensions:
+        raise HTTPException(
+            400,
+            f"不支援的音訊格式。支援 WAV/WebM，收到: {audio.content_type} ({ext})",
+        )
+
+    # 儲存到臨時檔案（faster-whisper 需要檔案路徑或 numpy array）
+    req_id = str(uuid.uuid4())
+    suffix = ext if ext else ".wav"
+    tmp_path = UPLOAD_DIR / f"stt_{req_id}{suffix}"
+
+    try:
+        content = await audio.read()
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+
+        start_t = time.time()
+        segments, info = whisper_model.transcribe(
+            str(tmp_path),
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        # 合併所有 segment 文字
+        full_text = "".join(seg.text for seg in segments).strip()
+        elapsed = time.time() - start_t
+
+        logger.info(
+            f"STT 完成: lang={info.language} prob={info.language_probability:.2f} "
+            f"duration={info.duration:.1f}s elapsed={elapsed:.2f}s"
+        )
+
+        return {
+            "data": {
+                "text": full_text,
+                "language": info.language,
+                "language_probability": round(info.language_probability, 3),
+                "duration": round(info.duration, 2),
+                "processing_time": round(elapsed, 3),
+            },
+            "error": None,
+        }
+    except Exception as e:
+        logger.error(f"STT 轉錄失敗: {e}")
+        raise HTTPException(500, f"語音轉錄失敗: {str(e)}")
+    finally:
+        # 清理臨時檔案
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+@app.post("/api/v1/stt/stream")
+async def transcribe_stream(request: Request):
+    """接收原始 PCM 音訊串流（16kHz, 16-bit, mono）→ 即時文字轉錄
+
+    桌面應用程式可以直接將麥克風 PCM 資料 POST 到此端點。
+    Content-Type 應為 application/octet-stream。
+    """
+    if whisper_model is None:
+        raise HTTPException(503, "Whisper 模型未載入")
+
+    try:
+        # 讀取整個 request body（原始 PCM bytes）
+        pcm_bytes = await request.body()
+        if len(pcm_bytes) == 0:
+            raise HTTPException(400, "空的音訊資料")
+
+        # 將 PCM bytes 轉為 numpy float32 array（faster-whisper 接受 numpy array）
+        # 格式：16kHz, 16-bit signed little-endian, mono
+        audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+        start_t = time.time()
+        segments, info = whisper_model.transcribe(
+            audio_array,
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        full_text = "".join(seg.text for seg in segments).strip()
+        elapsed = time.time() - start_t
+
+        logger.info(
+            f"STT 串流完成: lang={info.language} prob={info.language_probability:.2f} "
+            f"samples={len(audio_array)} elapsed={elapsed:.2f}s"
+        )
+
+        return {
+            "data": {
+                "text": full_text,
+                "language": info.language,
+                "language_probability": round(info.language_probability, 3),
+                "duration": round(len(audio_array) / 16000, 2),
+                "processing_time": round(elapsed, 3),
+            },
+            "error": None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"STT 串流轉錄失敗: {e}")
+        raise HTTPException(500, f"語音串流轉錄失敗: {str(e)}")
 
 
 # ============== 臉部動畫 ==============
@@ -295,6 +435,10 @@ async def models_status():
         "data": {
             "cosyvoice": {"loaded": cosyvoice_model is not None},
             "wav2lip": {"loaded": wav2lip_model is not None},
+            "whisper": {
+                "loaded": whisper_model is not None,
+                "model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
+            },
             "gpu_memory": gpu_mem,
         },
         "error": None,

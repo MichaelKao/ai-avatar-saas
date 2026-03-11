@@ -2,27 +2,42 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-type Status = 'idle' | 'connecting' | 'active' | 'ended';
+type Status = 'idle' | 'connecting' | 'active';
 
-interface Suggestion {
-  type: 'text' | 'audio' | 'video';
-  text?: string;
-  audioUrl?: string;
-  videoUrl?: string;
+interface LogEntry {
+  type: 'stt' | 'ai-text' | 'ai-audio' | 'ai-video' | 'system';
+  text: string;
   timestamp: number;
 }
 
 function App() {
-  const [apiUrl, setApiUrl] = useState('https://ai-avatar-saas-production.up.railway.app');
-  const [token, setToken] = useState('');
-  const [sessionId, setSessionId] = useState('');
-  const [mode, setMode] = useState(1);
+  // 設定（儲存在 localStorage）
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://ai-avatar-saas-production.up.railway.app');
+  const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://oq00jb5vt1laws-8888.proxy.runpod.net');
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
+  const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
+  const [showSettings, setShowSettings] = useState(false);
+
   const [status, setStatus] = useState<Status>('idle');
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [inputText, setInputText] = useState('');
+  const [sessionId, setSessionId] = useState('');
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
+
+  // 儲存設定到 localStorage
+  useEffect(() => {
+    localStorage.setItem('apiUrl', apiUrl);
+    localStorage.setItem('gpuUrl', gpuUrl);
+    localStorage.setItem('token', token);
+    localStorage.setItem('mode', mode.toString());
+  }, [apiUrl, gpuUrl, token, mode]);
+
+  // 自動滾動 log
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
   // 計時器
   useEffect(() => {
@@ -40,35 +55,25 @@ function App() {
     };
   }, [status]);
 
-  // 監聽 WebSocket 事件
+  // 監聽事件
   useEffect(() => {
     const unlisten1 = listen<string>('ws-message', (event) => {
       try {
         const msg = JSON.parse(event.payload);
         if (msg.type === 'suggestion_text') {
-          setSuggestions(prev => [...prev, {
-            type: 'text',
-            text: msg.payload?.text || msg.data?.text || '',
-            timestamp: Date.now(),
-          }]);
+          const text = msg.payload?.text || msg.data?.text || '';
+          addLog('ai-text', text);
         } else if (msg.type === 'tts_audio') {
           const audioUrl = msg.data?.audio_url || '';
-          setSuggestions(prev => [...prev, {
-            type: 'audio',
-            audioUrl,
-            timestamp: Date.now(),
-          }]);
-          // 自動播放音訊
+          addLog('ai-audio', '語音回覆已產生');
           if (audioUrl && audioRef.current) {
             audioRef.current.src = audioUrl;
             audioRef.current.play().catch(() => {});
           }
         } else if (msg.type === 'avatar_video') {
-          setSuggestions(prev => [...prev, {
-            type: 'video',
-            videoUrl: msg.data?.video_url || '',
-            timestamp: Date.now(),
-          }]);
+          addLog('ai-video', msg.data?.video_url || '');
+        } else if (msg.type === 'tts_status') {
+          addLog('system', 'AI 正在產生語音...');
         }
       } catch (e) {
         console.error('解析訊息失敗', e);
@@ -76,242 +81,304 @@ function App() {
     });
 
     const unlisten2 = listen<string>('ws-disconnected', () => {
-      setStatus('ended');
+      addLog('system', '連線已斷開');
+      setStatus('idle');
+    });
+
+    const unlisten3 = listen<string>('stt-result', (event) => {
+      addLog('stt', `對方說：${event.payload}`);
     });
 
     return () => {
       unlisten1.then(fn => fn());
       unlisten2.then(fn => fn());
+      unlisten3.then(fn => fn());
     };
   }, []);
 
+  const addLog = (type: LogEntry['type'], text: string) => {
+    setLogs(prev => [...prev.slice(-100), { type, text, timestamp: Date.now() }]);
+  };
+
   const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
     const sec = s % 60;
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
     return `${m}:${sec.toString().padStart(2, '0')}`;
   };
 
-  const handleConnect = async () => {
-    if (!token || !sessionId) {
-      alert('請填入 Token 和 Session ID');
+  const formatLogTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+  };
+
+  // === 一鍵啟動 ===
+  const handleStart = async () => {
+    if (!token) {
+      setShowSettings(true);
       return;
     }
+
     setStatus('connecting');
+    setLogs([]);
+    setElapsed(0);
+    addLog('system', '正在建立連線...');
+
     try {
-      await invoke('connect_session', { apiUrl, token, sessionId, mode });
+      // Step 1: 建立 Session
+      addLog('system', '建立 AI 會議 Session...');
+      const resp = await fetch(`${apiUrl}/api/v1/session/start`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || '建立 Session 失敗');
+
+      const sid = data.data?.sessionId || data.data?.id;
+      if (!sid) throw new Error('無法取得 Session ID');
+      setSessionId(sid);
+      addLog('system', `Session 已建立: ${sid.slice(0, 8)}...`);
+
+      // Step 2: 連接 WebSocket
+      addLog('system', '連接 WebSocket...');
+      await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
+      addLog('system', 'WebSocket 已連線');
+
+      // Step 3: 啟動自動模式（音訊擷取 + STT）
+      addLog('system', '啟動音訊擷取 + 語音辨識...');
+      await invoke('start_auto_mode', { app: null, gpuUrl, mode });
+      addLog('system', '自動模式已啟動 — AI 分身就緒！');
+
       setStatus('active');
-      setSuggestions([]);
-      setElapsed(0);
-    } catch (e) {
-      alert('連線失敗: ' + e);
+    } catch (e: any) {
+      addLog('system', `啟動失敗: ${e.message || e}`);
       setStatus('idle');
     }
   };
 
-  const handleDisconnect = async () => {
+  // === 一鍵停止 ===
+  const handleStop = async () => {
     try {
+      await invoke('stop_auto_mode');
       await invoke('disconnect_session');
+
+      // 結束 Session
+      if (sessionId) {
+        await fetch(`${apiUrl}/api/v1/session/${sessionId}/end`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` },
+        }).catch(() => {});
+      }
     } catch (e) {
       console.error(e);
     }
-    setStatus('ended');
-  };
-
-  const handleSend = async () => {
-    if (!inputText.trim()) return;
-    try {
-      await invoke('send_text', { text: inputText, mode });
-      setInputText('');
-    } catch (e) {
-      alert('傳送失敗: ' + e);
-    }
-  };
-
-  const handleReset = () => {
+    addLog('system', '分身已停止');
     setStatus('idle');
-    setSuggestions([]);
-    setElapsed(0);
-    setSessionId('');
   };
 
   return (
-    <div style={{ padding: 20, fontFamily: 'system-ui', maxWidth: 800, margin: '0 auto', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* 隱藏的音訊播放器 */}
+    <div style={{
+      height: '100vh', display: 'flex', flexDirection: 'column',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      background: status === 'active' ? '#0f172a' : '#f8fafc',
+      color: status === 'active' ? '#e2e8f0' : '#1e293b',
+      transition: 'all 0.3s',
+    }}>
+      {/* 隱藏音訊播放器 */}
       <audio ref={audioRef} style={{ display: 'none' }} />
 
-      {/* 標題列 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <h1 style={{ margin: 0, fontSize: 22 }}>AI Avatar Desktop</h1>
+      {/* 頂部列 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '12px 20px',
+        borderBottom: `1px solid ${status === 'active' ? '#334155' : '#e2e8f0'}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 20, fontWeight: 700 }}>AI 分身</span>
+          <span style={{
+            fontSize: 11, padding: '3px 10px', borderRadius: 99, fontWeight: 600,
+            background: status === 'idle' ? '#f1f5f9' : status === 'connecting' ? '#fef3c7' : '#065f46',
+            color: status === 'idle' ? '#64748b' : status === 'connecting' ? '#92400e' : '#a7f3d0',
+          }}>
+            {status === 'idle' ? '待機' : status === 'connecting' ? '啟動中' : '運行中'}
+          </span>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {status === 'active' && (
-            <span style={{ fontFamily: 'monospace', fontSize: 18, fontWeight: 'bold', background: '#f3f4f6', padding: '4px 12px', borderRadius: 8 }}>
+            <span style={{ fontFamily: 'monospace', fontSize: 16, fontWeight: 700, color: '#a7f3d0' }}>
               {formatTime(elapsed)}
             </span>
           )}
-          <span style={{
-            padding: '4px 12px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-            background: status === 'idle' ? '#f3f4f6' : status === 'connecting' ? '#fef3c7' : status === 'active' ? '#d1fae5' : '#f3f4f6',
-            color: status === 'idle' ? '#6b7280' : status === 'connecting' ? '#92400e' : status === 'active' ? '#065f46' : '#6b7280',
+          <button onClick={() => setShowSettings(!showSettings)} style={{
+            background: 'none', border: 'none', cursor: 'pointer', fontSize: 20,
+            color: status === 'active' ? '#94a3b8' : '#64748b',
           }}>
-            {status === 'idle' ? '待機中' : status === 'connecting' ? '連線中...' : status === 'active' ? '會議中' : '已結束'}
-          </span>
+            ⚙
+          </button>
         </div>
       </div>
 
-      {/* 待機畫面 */}
-      {status === 'idle' && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* 說明 */}
-          <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: 12 }}>
-            <p style={{ margin: 0, fontSize: 13, color: '#1e40af', fontWeight: 600, marginBottom: 4 }}>使用方式：</p>
-            <ol style={{ margin: 0, paddingLeft: 20, fontSize: 12, color: '#1e40af' }}>
-              <li>打開 Zoom / Google Meet / Teams 加入會議</li>
-              <li>先在 Web 版啟動一個 Session，取得 Session ID 和 Token</li>
-              <li>將 Token 和 Session ID 填入下方，選擇模式</li>
-              <li>點擊「連線」，將對方說的話輸入文字框</li>
-              <li>AI 即時給你回答建議</li>
-            </ol>
-          </div>
-
-          {/* 連線設定 */}
-          <div style={{ padding: 16, border: '1px solid #e5e7eb', borderRadius: 8 }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>連線設定</h3>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ fontSize: 13, fontWeight: 500 }}>API URL:</label>
+      {/* 設定面板 */}
+      {showSettings && (
+        <div style={{
+          padding: 16, borderBottom: `1px solid ${status === 'active' ? '#334155' : '#e2e8f0'}`,
+          background: status === 'active' ? '#1e293b' : '#fff',
+        }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>API URL</label>
               <input value={apiUrl} onChange={e => setApiUrl(e.target.value)}
-                style={{ width: '100%', padding: 8, marginTop: 4, borderRadius: 6, border: '1px solid #d1d5db', boxSizing: 'border-box' }} />
+                style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
             </div>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ fontSize: 13, fontWeight: 500 }}>Token:</label>
-              <input value={token} onChange={e => setToken(e.target.value)}
-                type="password" placeholder="JWT token from web login"
-                style={{ width: '100%', padding: 8, marginTop: 4, borderRadius: 6, border: '1px solid #d1d5db', boxSizing: 'border-box' }} />
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ fontSize: 13, fontWeight: 500 }}>Session ID:</label>
-              <input value={sessionId} onChange={e => setSessionId(e.target.value)}
-                placeholder="From web session/start"
-                style={{ width: '100%', padding: 8, marginTop: 4, borderRadius: 6, border: '1px solid #d1d5db', boxSizing: 'border-box' }} />
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>GPU URL</label>
+              <input value={gpuUrl} onChange={e => setGpuUrl(e.target.value)}
+                style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
             </div>
           </div>
-
-          {/* 模式選擇 */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>JWT Token</label>
+            <input value={token} onChange={e => setToken(e.target.value)} type="password"
+              placeholder="登入 Web 版後，從 DevTools → Local Storage 複製 token"
+              style={{ width: '100%', padding: 6, borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: status === 'active' ? '#0f172a' : '#fff', color: status === 'active' ? '#e2e8f0' : '#000' }} />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
             {[
-              { id: 1, name: 'Mode 1', desc: 'Prompt 提詞', detail: 'AI 顯示建議文字', color: '#3b82f6' },
-              { id: 2, name: 'Mode 2', desc: '語音分身', detail: 'AI 用你的聲音回答', color: '#8b5cf6' },
-              { id: 3, name: 'Mode 3', desc: '完整分身', detail: 'AI 臉+聲音替你開會', color: '#f97316' },
+              { id: 1, name: 'Mode 1 提詞', color: '#3b82f6' },
+              { id: 2, name: 'Mode 2 語音', color: '#8b5cf6' },
+              { id: 3, name: 'Mode 3 完整', color: '#f97316' },
             ].map(m => (
-              <button key={m.id} onClick={() => setMode(m.id)}
-                style={{
-                  padding: 12, borderRadius: 10, border: `2px solid ${mode === m.id ? m.color : '#e5e7eb'}`,
-                  background: mode === m.id ? `${m.color}10` : 'white', cursor: 'pointer', textAlign: 'left',
-                }}>
-                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{m.name}</div>
-                <div style={{ fontSize: 11, color: '#6b7280' }}>{m.desc}</div>
-                <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{m.detail}</div>
+              <button key={m.id} onClick={() => setMode(m.id)} style={{
+                flex: 1, padding: '6px 0', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                border: `2px solid ${mode === m.id ? m.color : '#cbd5e1'}`,
+                background: mode === m.id ? m.color : 'transparent',
+                color: mode === m.id ? '#fff' : (status === 'active' ? '#94a3b8' : '#64748b'),
+              }}>
+                {m.name}
               </button>
             ))}
           </div>
+        </div>
+      )}
 
-          {mode >= 2 && (
-            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 8, fontSize: 12, color: '#92400e' }}>
-              Mode {mode} 需要 GPU 服務運行中。語音會在桌面 App 播放。
+      {/* 主畫面 */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* 待機畫面 */}
+        {status === 'idle' && !showSettings && (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ textAlign: 'center', maxWidth: 400 }}>
+              <div style={{
+                width: 100, height: 100, borderRadius: 50, margin: '0 auto 20px',
+                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 48, color: '#fff',
+              }}>
+                🤖
+              </div>
+              <h2 style={{ margin: '0 0 8px', fontSize: 24 }}>AI 數位分身</h2>
+              <p style={{ margin: '0 0 24px', color: '#64748b', fontSize: 14, lineHeight: 1.6 }}>
+                一鍵啟動 AI 分身。接起 Zoom、Google Meet、Teams、LINE 任何視訊或通話，AI 會自動聽對方說話、用你的聲音和臉回應。
+              </p>
+
+              <div style={{
+                background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8,
+                padding: 12, marginBottom: 20, textAlign: 'left',
+              }}>
+                <p style={{ margin: '0 0 6px', fontSize: 12, fontWeight: 700, color: '#0369a1' }}>首次使用請先設定：</p>
+                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: '#0369a1', lineHeight: 1.8 }}>
+                  <li>安裝 <b>VB-Cable</b>（虛擬麥克風）</li>
+                  <li>安裝 <b>OBS Virtual Camera</b>（虛擬攝影機）</li>
+                  <li>視訊軟體設定麥克風為「VB-Cable Output」</li>
+                  <li>視訊軟體設定攝影機為「OBS Virtual Camera」</li>
+                  <li>點右上 ⚙ 填入 Token</li>
+                </ol>
+              </div>
+
+              <button onClick={handleStart} style={{
+                width: '100%', padding: '14px 0', borderRadius: 12, border: 'none',
+                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                color: '#fff', fontSize: 18, fontWeight: 700, cursor: 'pointer',
+                boxShadow: '0 4px 15px rgba(59,130,246,0.4)',
+              }}>
+                啟動分身
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          <button onClick={handleConnect}
-            style={{ padding: '12px 24px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: 10, fontSize: 16, cursor: 'pointer', fontWeight: 600 }}>
-            連線會議
-          </button>
-        </div>
-      )}
+        {/* 連線中 */}
+        {status === 'connecting' && (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{
+                width: 60, height: 60, border: '3px solid #3b82f6', borderTopColor: 'transparent',
+                borderRadius: 30, margin: '0 auto 16px',
+                animation: 'spin 1s linear infinite',
+              }} />
+              <p style={{ color: '#64748b', fontSize: 16 }}>啟動 AI 分身中...</p>
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            </div>
+          </div>
+        )}
 
-      {/* 連線中 */}
-      {status === 'connecting' && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <p style={{ color: '#6b7280', fontSize: 16 }}>正在建立連線...</p>
-        </div>
-      )}
-
-      {/* 活躍會議 */}
-      {status === 'active' && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
-          {/* AI 建議區 */}
-          <div style={{ flex: 1, overflow: 'auto', padding: 16, border: '1px solid #e5e7eb', borderRadius: 8, background: '#fafafa' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>AI 建議回覆</h3>
-            {suggestions.length === 0 ? (
-              <p style={{ color: '#9ca3af' }}>等待對話中... 在下方輸入對方說的話</p>
-            ) : (
-              suggestions.map((s, i) => (
+        {/* 運行中 — Log 畫面 */}
+        {status === 'active' && (
+          <>
+            <div style={{
+              flex: 1, overflow: 'auto', padding: '12px 16px',
+              fontSize: 13, lineHeight: 1.6,
+            }}>
+              {logs.map((log, i) => (
                 <div key={i} style={{
-                  padding: 10, marginBottom: 8, borderRadius: 6,
-                  borderLeft: `3px solid ${s.type === 'text' ? '#3b82f6' : s.type === 'audio' ? '#8b5cf6' : '#f97316'}`,
-                  background: s.type === 'text' ? '#eff6ff' : s.type === 'audio' ? '#f5f3ff' : '#fff7ed',
+                  display: 'flex', gap: 8, marginBottom: 4,
+                  opacity: log.type === 'system' ? 0.5 : 1,
                 }}>
-                  {s.type === 'text' && <p style={{ margin: 0, fontSize: 14 }}>{s.text}</p>}
-                  {s.type === 'audio' && (
-                    <div>
-                      <p style={{ margin: '0 0 6px', fontSize: 12, color: '#7c3aed' }}>TTS 語音已播放</p>
-                      <audio controls src={s.audioUrl} style={{ width: '100%', height: 32 }} />
-                    </div>
-                  )}
-                  {s.type === 'video' && (
-                    <div>
-                      <p style={{ margin: '0 0 6px', fontSize: 12, color: '#ea580c' }}>Avatar 影片</p>
-                      <video controls src={s.videoUrl} style={{ width: '100%', maxHeight: 200, borderRadius: 4 }} />
-                    </div>
-                  )}
+                  <span style={{ color: '#64748b', fontSize: 11, fontFamily: 'monospace', flexShrink: 0, marginTop: 2 }}>
+                    {formatLogTime(log.timestamp)}
+                  </span>
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, flexShrink: 0, marginTop: 2,
+                    color: log.type === 'stt' ? '#38bdf8'
+                      : log.type === 'ai-text' ? '#4ade80'
+                      : log.type === 'ai-audio' ? '#c084fc'
+                      : log.type === 'ai-video' ? '#fb923c'
+                      : '#64748b',
+                  }}>
+                    {log.type === 'stt' ? '[聽到]'
+                      : log.type === 'ai-text' ? '[AI]'
+                      : log.type === 'ai-audio' ? '[語音]'
+                      : log.type === 'ai-video' ? '[影片]'
+                      : '[系統]'}
+                  </span>
+                  <span>{log.text}</span>
                 </div>
-              ))
-            )}
-          </div>
-
-          {/* 文字輸入 */}
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              value={inputText}
-              onChange={e => setInputText(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSend()}
-              placeholder="輸入對方說的話..."
-              style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #d1d5db', fontSize: 14 }}
-            />
-            <button onClick={handleSend}
-              style={{ padding: '10px 20px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
-              傳送
-            </button>
-          </div>
-
-          {/* 控制列 */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'white', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-            <span style={{ fontSize: 12, color: '#6b7280' }}>
-              Session: <span style={{ fontFamily: 'monospace' }}>{sessionId.slice(0, 8)}...</span> | Mode {mode}
-            </span>
-            <button onClick={handleDisconnect}
-              style={{ padding: '6px 16px', background: '#ef4444', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-              結束會議
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 已結束 */}
-      {status === 'ended' && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ width: 64, height: 64, borderRadius: 32, background: '#d1fae5', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px', fontSize: 28 }}>
-              ✓
+              ))}
+              <div ref={logsEndRef} />
             </div>
-            <h3 style={{ marginBottom: 8 }}>會議已結束</h3>
-            <p style={{ color: '#6b7280', marginBottom: 4 }}>總時長：{formatTime(elapsed)}</p>
-            <p style={{ color: '#6b7280', marginBottom: 20 }}>AI 共提供 {suggestions.length} 則建議</p>
-            <button onClick={handleReset}
-              style={{ padding: '10px 24px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
-              新的會議
-            </button>
-          </div>
-        </div>
-      )}
+
+            {/* 底部控制列 */}
+            <div style={{
+              padding: '10px 16px', borderTop: '1px solid #334155',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            }}>
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                Mode {mode} | Session: {sessionId.slice(0, 8)}...
+              </div>
+              <button onClick={handleStop} style={{
+                padding: '8px 24px', borderRadius: 8, border: 'none',
+                background: '#ef4444', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              }}>
+                停止分身
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
