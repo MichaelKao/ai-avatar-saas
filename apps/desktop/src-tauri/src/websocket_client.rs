@@ -22,7 +22,7 @@ fn get_sender() -> &'static WsSender {
 }
 
 /// 建立 WebSocket 連線
-pub async fn connect(app: tauri::AppHandle, url: &str) -> Result<(), String> {
+pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(), String> {
     let (ws_stream, _) = connect_async(url)
         .await
         .map_err(|e| format!("WebSocket 連線失敗: {}", e))?;
@@ -42,26 +42,20 @@ pub async fn connect(app: tauri::AppHandle, url: &str) -> Result<(), String> {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // 解析伺服器訊息並轉發給前端
                     use tauri::Emitter;
-                    app_clone.emit("ws-message", &text).ok();
-                }
-                Ok(Message::Binary(data)) => {
-                    // 影片幀資料
-                    use tauri::Emitter;
-                    let b64 = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data
-                    );
-                    app_clone.emit("ws-video-frame", &b64).ok();
+                    app_clone.emit("ws-message", text.as_str()).ok();
                 }
                 Ok(Message::Close(_)) => {
                     CONNECTED.store(false, Ordering::SeqCst);
+                    use tauri::Emitter;
+                    app_clone.emit("ws-disconnected", "closed").ok();
                     break;
                 }
                 Err(e) => {
                     eprintln!("WebSocket 錯誤: {}", e);
                     CONNECTED.store(false, Ordering::SeqCst);
+                    use tauri::Emitter;
+                    app_clone.emit("ws-disconnected", "error").ok();
                     break;
                 }
                 _ => {}
@@ -72,33 +66,33 @@ pub async fn connect(app: tauri::AppHandle, url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 發送文字訊息
-pub async fn send_text(text: &str) -> Result<(), String> {
+/// 發送文字訊息到 Gateway
+pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
     let sender = get_sender();
     let mut guard = sender.lock().await;
 
     if let Some(ref mut ws) = *guard {
         let msg = serde_json::json!({
-            "type": "transcribed_text",
-            "payload": {
-                "text": text,
-                "language": "zh-TW",
-                "timestamp": chrono::Utc::now().timestamp_millis()
-            }
+            "text": text,
+            "mode": mode,
         });
 
         ws.send(Message::Text(msg.to_string()))
             .await
             .map_err(|e| format!("發送失敗: {}", e))?;
+        Ok(())
+    } else {
+        Err("未連線".to_string())
     }
-
-    Ok(())
 }
 
 /// 斷開連線
 pub async fn disconnect() {
     let sender = get_sender();
     let mut guard = sender.lock().await;
+    if let Some(ref mut ws) = *guard {
+        let _ = ws.close().await;
+    }
     *guard = None;
     CONNECTED.store(false, Ordering::SeqCst);
 }

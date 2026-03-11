@@ -13,10 +13,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2"
-uuid = { version = "1", features = ["v4"] }
-whisper-rs = "0.12"
-cpal = "0.15"  # 音訊捕捉
-hound = "3.5"  # WAV 檔案處理
 base64 = "0.22"
 
 [build-dependencies]
