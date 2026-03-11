@@ -4,6 +4,8 @@
 mod websocket_client;
 mod audio_capture;
 mod stt_client;
+mod obs_virtual_cam;
+mod obs_manager;
 
 fn main() {
     tauri::Builder::default()
@@ -23,6 +25,13 @@ fn main() {
             install_vb_cable,
             auto_setup,
             play_audio_to_vbcable,
+            open_avatar_window,
+            close_avatar_window,
+            emit_avatar_video,
+            start_obs_virtual_cam,
+            stop_obs_virtual_cam,
+            ensure_obs_ready,
+            cleanup_obs,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -496,6 +505,78 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
 
     drop(stream);
     Ok(format!("已播放到 {}", device_name))
+}
+
+/// 開啟 Avatar 獨立視窗（無邊框，供 OBS 擷取用）
+#[tauri::command]
+async fn open_avatar_window(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+
+    // 已開啟就聚焦
+    if let Some(window) = app.get_webview_window("avatar") {
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok("Avatar 視窗已開啟".to_string());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "avatar",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("AI Avatar Camera")
+    .decorations(false)
+    .always_on_top(true)
+    .inner_size(640.0, 480.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("開啟視窗失敗: {}", e))?;
+
+    Ok("Avatar 視窗已開啟".to_string())
+}
+
+/// 關閉 Avatar 視窗
+#[tauri::command]
+async fn close_avatar_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("avatar") {
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 發送影片 URL 到 Avatar 視窗
+#[tauri::command]
+async fn emit_avatar_video(app: tauri::AppHandle, video_url: String) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit_to("avatar", "avatar-video-update", &video_url)
+        .map_err(|e| format!("發送失敗: {}", e))?;
+    Ok(())
+}
+
+/// 啟動 OBS 虛擬鏡頭（自動設定場景 + 視窗擷取 + 啟動）
+#[tauri::command]
+async fn start_obs_virtual_cam(password: Option<String>) -> Result<String, String> {
+    obs_virtual_cam::setup_virtual_camera(password, "AI Avatar Camera").await
+}
+
+/// 停止 OBS 虛擬鏡頭
+#[tauri::command]
+async fn stop_obs_virtual_cam(password: Option<String>) -> Result<String, String> {
+    obs_virtual_cam::stop_virtual_camera(password).await
+}
+
+/// 確保 OBS 就緒（自動偵測 → 下載 → 安裝 → 設定 → 啟動）
+#[tauri::command]
+async fn ensure_obs_ready(app: tauri::AppHandle) -> Result<String, String> {
+    obs_manager::ensure_obs_ready(&app).await?;
+    Ok("OBS 虛擬鏡頭環境就緒".to_string())
+}
+
+/// 清理 OBS（停止虛擬鏡頭 + 關閉由我們啟動的 OBS 程序）
+#[tauri::command]
+async fn cleanup_obs() -> Result<String, String> {
+    obs_manager::cleanup_obs().await?;
+    Ok("OBS 已清理".to_string())
 }
 
 /// Calculate RMS of audio samples

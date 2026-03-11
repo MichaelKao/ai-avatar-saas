@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 type AppScreen = 'login' | 'setup' | 'main';
 type Status = 'idle' | 'connecting' | 'active';
+type ObsStatus = 'off' | 'starting' | 'running';
 
 interface LogEntry {
   type: 'stt' | 'ai-text' | 'ai-audio' | 'ai-video' | 'system';
@@ -33,7 +35,7 @@ const inputStyle = (dark: boolean): React.CSSProperties => ({
 const gradientBg = 'linear-gradient(135deg, #3b82f6, #8b5cf6)';
 
 // ---------------------------------------------------------------------------
-// SVG Icons (no emojis)
+// SVG Icons
 // ---------------------------------------------------------------------------
 const IconGear = () => (
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -49,18 +51,81 @@ const IconUser = () => (
   </svg>
 );
 
-const IconCheck = ({ checked }: { checked: boolean }) => (
-  <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-    <rect x="1" y="1" width="20" height="20" rx="4" stroke={checked ? '#22c55e' : '#64748b'} strokeWidth="2" fill={checked ? '#22c55e' : 'none'} />
-    {checked && <polyline points="6,11 10,15 16,7" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />}
-  </svg>
-);
-
 const IconLogout = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <path d="M6 14H3a1 1 0 01-1-1V3a1 1 0 011-1h3M11 11l3-3-3-3M14 8H6" />
   </svg>
 );
+
+const IconCamera = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1 4.5a1 1 0 011-1h2.5l1-1.5h5l1 1.5H14a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1v-7z" />
+    <circle cx="8" cy="8" r="2.5" />
+  </svg>
+);
+
+// ---------------------------------------------------------------------------
+// AvatarWindow — 獨立無邊框視窗，只顯示 Avatar 影片（給 OBS 擷取用）
+// ---------------------------------------------------------------------------
+function AvatarWindow() {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoUrl, setVideoUrl] = useState('');
+  const [hasVideo, setHasVideo] = useState(false);
+
+  useEffect(() => {
+    const unlisten = listen<string>('avatar-video-update', (event) => {
+      setVideoUrl(event.payload);
+      setHasVideo(true);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  useEffect(() => {
+    if (videoUrl && videoRef.current) {
+      videoRef.current.src = videoUrl;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [videoUrl]);
+
+  return (
+    <div style={{
+      width: '100vw',
+      height: '100vh',
+      background: '#000',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+      cursor: 'default',
+    }}>
+      <video
+        ref={videoRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          display: hasVideo ? 'block' : 'none',
+        }}
+        playsInline
+      />
+      {!hasVideo && (
+        <div style={{
+          color: '#475569',
+          fontSize: 14,
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+          textAlign: 'center',
+        }}>
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="#334155" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 12 }}>
+            <rect x="8" y="10" width="32" height="24" rx="4" />
+            <circle cx="24" cy="22" r="6" />
+            <path d="M16 38h16" />
+          </svg>
+          <div>等待 AI Avatar 影片...</div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // LoginPage
@@ -107,7 +172,6 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
         background: '#1e293b',
         boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
       }}>
-        {/* Logo / Brand */}
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{
             width: 72, height: 72, borderRadius: 36, margin: '0 auto 16px',
@@ -184,7 +248,7 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
 }
 
 // ---------------------------------------------------------------------------
-// SetupPage (first-run checklist)
+// SetupPage
 // ---------------------------------------------------------------------------
 function SetupPage({ onDone }: { onDone: () => void }) {
   const [progressMsg, setProgressMsg] = useState('正在檢測環境...');
@@ -195,7 +259,6 @@ function SetupPage({ onDone }: { onDone: () => void }) {
       setProgressMsg(event.payload);
     });
 
-    // Auto-setup: detect + install if needed, then proceed
     const run = async () => {
       try {
         const result: any = await invoke('auto_setup');
@@ -270,11 +333,21 @@ function SetupPage({ onDone }: { onDone: () => void }) {
 // Main App
 // ---------------------------------------------------------------------------
 function App() {
+  // 判斷是否為 Avatar 獨立視窗
+  const windowLabel = getCurrentWindow().label;
+  if (windowLabel === 'avatar') {
+    return <AvatarWindow />;
+  }
+
+  return <MainApp />;
+}
+
+function MainApp() {
   // Auth state
   const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem('setupDone') === 'true');
 
-  // Settings (saved in localStorage)
+  // Settings
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://ai-avatar-saas-production.up.railway.app');
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://oq00jb5vt1laws-8888.proxy.runpod.net');
   const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
@@ -289,7 +362,11 @@ function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Determine current screen
+  // Avatar 影片 + OBS 虛擬鏡頭
+  const [avatarVideoUrl, setAvatarVideoUrl] = useState('');
+  const [obsStatus, setObsStatus] = useState<ObsStatus>('off');
+  const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const screen: AppScreen = !token ? 'login' : !setupDone ? 'setup' : 'main';
 
   // -----------------------------------------------------------------------
@@ -349,11 +426,9 @@ function App() {
           const audioUrl = msg.data?.audio_url || '';
           addLog('ai-audio', '語音回覆已產生');
           if (audioUrl) {
-            // Play TTS audio to VB-Cable so video call apps hear it
             invoke('play_audio_to_vbcable', { audioUrl }).then(() => {
               addLog('ai-audio', '語音已送出到虛擬麥克風');
             }).catch(() => {
-              // Fallback: play through speakers
               if (audioRef.current) {
                 audioRef.current.src = audioUrl;
                 audioRef.current.play().catch(() => {});
@@ -361,7 +436,13 @@ function App() {
             });
           }
         } else if (msg.type === 'avatar_video') {
-          addLog('ai-video', msg.data?.video_url || '');
+          const videoUrl = msg.data?.video_url || '';
+          addLog('ai-video', '臉部動畫已產生');
+          if (videoUrl) {
+            setAvatarVideoUrl(videoUrl);
+            // 同步發送到 Avatar 獨立視窗
+            invoke('emit_avatar_video', { videoUrl }).catch(() => {});
+          }
         } else if (msg.type === 'tts_status') {
           addLog('system', 'AI 正在產生語音...');
         }
@@ -379,12 +460,28 @@ function App() {
       addLog('stt', `對方說：${event.payload}`);
     });
 
+    // OBS 安裝進度
+    const unlisten4 = listen<string>('obs-install-progress', (event) => {
+      addLog('system', event.payload);
+    });
+
     return () => {
       unlisten1.then(fn => fn());
       unlisten2.then(fn => fn());
       unlisten3.then(fn => fn());
+      unlisten4.then(fn => fn());
     };
   }, []);
+
+  // -----------------------------------------------------------------------
+  // 播放 Avatar 影片
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    if (avatarVideoUrl && avatarVideoRef.current) {
+      avatarVideoRef.current.src = avatarVideoUrl;
+      avatarVideoRef.current.play().catch(() => {});
+    }
+  }, [avatarVideoUrl]);
 
   // -----------------------------------------------------------------------
   // Helpers
@@ -414,7 +511,6 @@ function App() {
   }, []);
 
   const handleLogout = useCallback(async () => {
-    // Stop everything first if active
     if (status === 'active') {
       try {
         await invoke('stop_auto_mode');
@@ -427,6 +523,8 @@ function App() {
     setLogs([]);
     setElapsed(0);
     setShowSettings(false);
+    setObsStatus('off');
+    setAvatarVideoUrl('');
     localStorage.removeItem('token');
   }, [status]);
 
@@ -441,10 +539,25 @@ function App() {
     setStatus('connecting');
     setLogs([]);
     setElapsed(0);
+    setAvatarVideoUrl('');
     addLog('system', '正在建立連線...');
 
     try {
-      // Step 1: Create session (via Rust backend to avoid CORS)
+      // Mode 3：自動設定虛擬鏡頭（OBS 全自動，使用者不需要操作）
+      if (mode === 3) {
+        addLog('system', '正在準備虛擬鏡頭環境...');
+        await invoke('ensure_obs_ready');
+
+        // 開啟 Avatar 視窗（給 OBS 擷取用）
+        await invoke('open_avatar_window');
+        await new Promise(r => setTimeout(r, 800));
+
+        // 設定 OBS 場景 + 啟動虛擬鏡頭
+        const obsResult: string = await invoke('start_obs_virtual_cam', { password: null });
+        setObsStatus('running');
+        addLog('system', obsResult);
+      }
+
       addLog('system', '建立 AI 會議 Session...');
       let data: any;
       try {
@@ -463,12 +576,10 @@ function App() {
       setSessionId(sid);
       addLog('system', `Session 已建立: ${sid.slice(0, 8)}...`);
 
-      // Step 2: Connect WebSocket
       addLog('system', '連接 WebSocket...');
       await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
       addLog('system', 'WebSocket 已連線');
 
-      // Step 3: Start auto mode (audio capture + STT)
       addLog('system', '啟動音訊擷取 + 語音辨識...');
       await invoke('start_auto_mode', { app: null, gpuUrl, mode });
       addLog('system', '自動模式已啟動 — AI 分身就緒！');
@@ -484,6 +595,9 @@ function App() {
     try {
       await invoke('stop_auto_mode');
       await invoke('disconnect_session');
+      invoke('close_avatar_window').catch(() => {});
+      // 自動清理 OBS（停止虛擬鏡頭 + 關閉 OBS）
+      invoke('cleanup_obs').catch(() => {});
 
       if (sessionId) {
         await invoke('api_end_session', { apiUrl, token, sessionId }).catch(() => {});
@@ -493,6 +607,8 @@ function App() {
     }
     addLog('system', '分身已停止');
     setStatus('idle');
+    setObsStatus('off');
+    setAvatarVideoUrl('');
   };
 
   // -----------------------------------------------------------------------
@@ -503,7 +619,7 @@ function App() {
   }
 
   // -----------------------------------------------------------------------
-  // Render: Setup checklist
+  // Render: Setup
   // -----------------------------------------------------------------------
   if (screen === 'setup') {
     return <SetupPage onDone={handleSetupDone} />;
@@ -513,6 +629,7 @@ function App() {
   // Render: Main screen
   // -----------------------------------------------------------------------
   const dark = status === 'active';
+  const isMode3 = mode === 3;
 
   return (
     <div style={{
@@ -551,6 +668,18 @@ function App() {
           }}>
             {status === 'idle' ? '待機' : status === 'connecting' ? '啟動中' : '運行中'}
           </span>
+          {obsStatus === 'running' && (
+            <span style={{
+              fontSize: 11,
+              padding: '3px 10px',
+              borderRadius: 99,
+              fontWeight: 600,
+              background: '#1e3a5f',
+              color: '#60a5fa',
+            }}>
+              虛擬鏡頭
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {status === 'active' && (
@@ -720,53 +849,129 @@ function App() {
           </div>
         )}
 
-        {/* Active: log view */}
+        {/* Active: split view — left: avatar preview + controls, right: logs */}
         {status === 'active' && (
           <>
-            <div style={{
-              flex: 1,
-              overflow: 'auto',
-              padding: '12px 16px',
-              fontSize: 13,
-              lineHeight: 1.6,
-            }}>
-              {logs.map((log, i) => (
-                <div key={i} style={{
+            <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+              {/* 左側：Avatar 影片預覽 + 控制按鈕 */}
+              {isMode3 && (
+                <div style={{
+                  width: 300,
+                  borderRight: '1px solid #334155',
                   display: 'flex',
-                  gap: 8,
-                  marginBottom: 4,
-                  opacity: log.type === 'system' ? 0.5 : 1,
+                  flexDirection: 'column',
+                  padding: 12,
+                  gap: 10,
+                  flexShrink: 0,
                 }}>
-                  <span style={{
-                    color: '#64748b',
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    flexShrink: 0,
-                    marginTop: 2,
+                  {/* 影片預覽 */}
+                  <div style={{
+                    aspectRatio: '4/3',
+                    background: '#000',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    position: 'relative',
                   }}>
-                    {formatLogTime(log.timestamp)}
-                  </span>
-                  <span style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    flexShrink: 0,
-                    marginTop: 2,
-                    color: log.type === 'stt' ? '#38bdf8'
-                      : log.type === 'ai-text' ? '#4ade80'
-                      : log.type === 'ai-audio' ? '#c084fc'
-                      : log.type === 'ai-video' ? '#fb923c'
-                      : '#64748b',
+                    {avatarVideoUrl ? (
+                      <video
+                        ref={avatarVideoRef}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        playsInline
+                      />
+                    ) : (
+                      <div style={{
+                        width: '100%',
+                        height: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'column',
+                        gap: 8,
+                        color: '#475569',
+                        fontSize: 12,
+                      }}>
+                        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="#334155" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="4" y="6" width="24" height="16" rx="3" />
+                          <circle cx="16" cy="14" r="4" />
+                          <path d="M10 26h12" />
+                        </svg>
+                        <span>等待 AI 回應影片...</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 虛擬鏡頭狀態 */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    background: obsStatus === 'running' ? 'rgba(59,130,246,0.15)' : '#1e293b',
+                    border: `1px solid ${obsStatus === 'running' ? '#3b82f6' : '#334155'}`,
                   }}>
-                    {log.type === 'stt' ? '[聽到]'
-                      : log.type === 'ai-text' ? '[AI]'
-                      : log.type === 'ai-audio' ? '[語音]'
-                      : log.type === 'ai-video' ? '[影片]'
-                      : '[系統]'}
-                  </span>
-                  <span>{log.text}</span>
+                    <IconCamera />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: obsStatus === 'running' ? '#60a5fa' : '#94a3b8' }}>
+                        {obsStatus === 'running' ? '虛擬鏡頭運行中' : '虛擬鏡頭待機'}
+                      </div>
+                      {obsStatus === 'running' && (
+                        <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                          在視訊軟體選擇「OBS Virtual Camera」
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              ))}
-              <div ref={logsEndRef} />
+              )}
+
+              {/* 右側：即時日誌 */}
+              <div style={{
+                flex: 1,
+                overflow: 'auto',
+                padding: '12px 16px',
+                fontSize: 13,
+                lineHeight: 1.6,
+              }}>
+                {logs.map((log, i) => (
+                  <div key={i} style={{
+                    display: 'flex',
+                    gap: 8,
+                    marginBottom: 4,
+                    opacity: log.type === 'system' ? 0.5 : 1,
+                  }}>
+                    <span style={{
+                      color: '#64748b',
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      flexShrink: 0,
+                      marginTop: 2,
+                    }}>
+                      {formatLogTime(log.timestamp)}
+                    </span>
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      flexShrink: 0,
+                      marginTop: 2,
+                      color: log.type === 'stt' ? '#38bdf8'
+                        : log.type === 'ai-text' ? '#4ade80'
+                        : log.type === 'ai-audio' ? '#c084fc'
+                        : log.type === 'ai-video' ? '#fb923c'
+                        : '#64748b',
+                    }}>
+                      {log.type === 'stt' ? '[聽到]'
+                        : log.type === 'ai-text' ? '[AI]'
+                        : log.type === 'ai-audio' ? '[語音]'
+                        : log.type === 'ai-video' ? '[影片]'
+                        : '[系統]'}
+                    </span>
+                    <span>{log.text}</span>
+                  </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
             </div>
 
             {/* Bottom control bar */}
