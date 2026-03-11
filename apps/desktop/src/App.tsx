@@ -587,6 +587,17 @@ function MainApp() {
     addLog('system', '正在建立連線...');
 
     try {
+      // 自動將 Windows 預設麥克風切換為 CABLE Output
+      // 這樣 LINE/Zoom/Teams/Meet 全部自動使用虛擬麥克風，不需個別設定
+      if (mode >= 2) {
+        try {
+          const micResult: string = await invoke('auto_set_default_mic');
+          addLog('system', micResult);
+        } catch (err: any) {
+          addLog('system', `麥克風切換失敗: ${err}`);
+        }
+      }
+
       // Mode 2/3：擷取 webcam 截圖 + 設定聲音性別
       let faceBase64 = '';
       if (mode >= 2) {
@@ -659,6 +670,8 @@ function MainApp() {
       invoke('close_avatar_window').catch(() => {});
       // 自動清理 OBS（停止虛擬鏡頭 + 關閉 OBS）
       invoke('cleanup_obs').catch(() => {});
+      // 還原 Windows 預設麥克風
+      invoke('restore_default_mic').catch(() => {});
 
       if (sessionId) {
         await invoke('api_end_session', { apiUrl, token, sessionId }).catch(() => {});

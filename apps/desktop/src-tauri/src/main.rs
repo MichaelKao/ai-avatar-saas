@@ -33,6 +33,8 @@ fn main() {
             ensure_obs_ready,
             cleanup_obs,
             set_voice_and_face,
+            auto_set_default_mic,
+            restore_default_mic,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -428,14 +430,15 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
     let mut reader = hound::WavReader::new(cursor)
         .map_err(|e| format!("解析 WAV 失敗: {}", e))?;
     let spec = reader.spec();
-    let samples: Vec<i16> = if spec.bits_per_sample == 16 {
-        reader.samples::<i16>().filter_map(|s| s.ok()).collect()
+    let wav_samples: Vec<f32> = if spec.bits_per_sample == 16 {
+        reader.samples::<i16>().filter_map(|s| s.ok())
+            .map(|s| s as f32 / 32768.0).collect()
     } else {
         reader.samples::<i32>().filter_map(|s| s.ok())
-            .map(|s| (s >> 16) as i16).collect()
+            .map(|s| s as f32 / 2147483648.0).collect()
     };
 
-    if samples.is_empty() {
+    if wav_samples.is_empty() {
         return Err("音訊資料為空".to_string());
     }
 
@@ -453,17 +456,41 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
 
     let device_name = vb_device.name().unwrap_or_default();
 
-    // Configure stream
-    let sample_rate = spec.sample_rate;
-    let channels = spec.channels as usize;
+    // 使用 VB-Cable 的預設輸出設定（而不是 WAV 檔案的取樣率）
+    // VB-Cable 通常只支援 44100/48000 Hz，TTS 輸出的 22050 Hz 會導致串流建立失敗
+    let device_config = vb_device.default_output_config()
+        .map_err(|e| format!("取得 VB-Cable 預設設定失敗: {}", e))?;
+    let device_sample_rate = device_config.sample_rate().0;
+    let device_channels = device_config.channels() as usize;
+
+    // 先混合成 mono（如果 WAV 是 stereo）
+    let wav_channels = spec.channels as usize;
+    let mono_samples: Vec<f32> = wav_samples.chunks(wav_channels)
+        .map(|frame| frame.iter().sum::<f32>() / wav_channels as f32)
+        .collect();
+
+    // 重新取樣到 VB-Cable 的取樣率
+    let resampled = if spec.sample_rate != device_sample_rate {
+        simple_resample_f32(&mono_samples, spec.sample_rate, device_sample_rate)
+    } else {
+        mono_samples
+    };
+
+    // 如果 VB-Cable 需要多聲道，擴展 mono → multi-channel
+    let final_samples: Vec<f32> = if device_channels > 1 {
+        resampled.iter().flat_map(|&s| std::iter::repeat(s).take(device_channels)).collect()
+    } else {
+        resampled
+    };
+
     let config = cpal::StreamConfig {
-        channels: channels as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
+        channels: device_channels as u16,
+        sample_rate: cpal::SampleRate(device_sample_rate),
         buffer_size: cpal::BufferSize::Default,
     };
 
     // Play audio
-    let samples = std::sync::Arc::new(samples);
+    let samples = std::sync::Arc::new(final_samples);
     let pos = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -475,21 +502,14 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
         &config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let total = samples_clone.len();
-            for frame in data.chunks_mut(channels) {
+            for sample in data.iter_mut() {
                 let idx = pos_clone.load(std::sync::atomic::Ordering::Relaxed);
                 if idx >= total {
-                    for s in frame.iter_mut() { *s = 0.0; }
+                    *sample = 0.0;
                     done_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                 } else {
-                    for (ch, s) in frame.iter_mut().enumerate() {
-                        let sample_idx = idx + ch;
-                        if sample_idx < total {
-                            *s = samples_clone[sample_idx] as f32 / 32768.0;
-                        } else {
-                            *s = 0.0;
-                        }
-                    }
-                    pos_clone.fetch_add(channels, std::sync::atomic::Ordering::Relaxed);
+                    *sample = samples_clone[idx];
+                    pos_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         },
@@ -500,12 +520,31 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
     stream.play().map_err(|e| format!("播放失敗: {}", e))?;
 
     // Wait for playback to finish
-    let duration_secs = samples.len() as f64 / (sample_rate as f64 * channels as f64);
+    let total_samples = samples.len();
+    let duration_secs = total_samples as f64 / (device_sample_rate as f64 * device_channels as f64);
     let wait_ms = (duration_secs * 1000.0) as u64 + 500;
     std::thread::sleep(std::time::Duration::from_millis(wait_ms));
 
     drop(stream);
-    Ok(format!("已播放到 {}", device_name))
+    Ok(format!("已播放到 {} ({}Hz {}ch)", device_name, device_sample_rate, device_channels))
+}
+
+/// 簡單線性重新取樣（f32 版本）
+fn simple_resample_f32(data: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    let ratio = from_rate as f64 / to_rate as f64;
+    let new_len = (data.len() as f64 / ratio) as usize;
+    let mut result = Vec::with_capacity(new_len);
+    for i in 0..new_len {
+        let src_idx = i as f64 * ratio;
+        let idx = src_idx as usize;
+        let frac = (src_idx - idx as f64) as f32;
+        if idx + 1 < data.len() {
+            result.push(data[idx] * (1.0 - frac) + data[idx + 1] * frac);
+        } else if idx < data.len() {
+            result.push(data[idx]);
+        }
+    }
+    result
 }
 
 /// 開啟 Avatar 獨立視窗（無邊框，供 OBS 擷取用）
@@ -593,6 +632,73 @@ async fn cleanup_obs() -> Result<String, String> {
 async fn set_voice_and_face(voice_gender: String, face_image_base64: String) -> Result<(), String> {
     websocket_client::set_session_config(&voice_gender, &face_image_base64).await;
     Ok(())
+}
+
+/// 自動將 Windows 預設麥克風切換為 CABLE Output（所有 APP 自動生效）
+#[tauri::command]
+async fn auto_set_default_mic() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+
+    // 將 PowerShell 腳本寫到暫存目錄
+    let script = include_str!("set_default_mic.ps1");
+    let script_path = std::env::temp_dir().join("ai-avatar-set-mic.ps1");
+    std::fs::write(&script_path, script)
+        .map_err(|e| format!("寫入腳本失敗: {}", e))?;
+
+    let output: std::process::Output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", script_path.to_str().unwrap_or(""),
+                "-Action", "set",
+            ])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+    }).await
+        .map_err(|e| format!("執行緒錯誤: {}", e))?
+        .map_err(|e| format!("執行 PowerShell 失敗: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.contains("OK") {
+        Ok("已將預設麥克風切換為 CABLE Output（所有 APP 自動生效）".to_string())
+    } else if stdout.contains("NOTFOUND") {
+        Err("找不到 VB-Cable 錄音裝置".to_string())
+    } else {
+        Err(format!("切換失敗: {}", stdout.trim()))
+    }
+}
+
+/// 還原 Windows 預設麥克風
+#[tauri::command]
+async fn restore_default_mic() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+
+    let script_path = std::env::temp_dir().join("ai-avatar-set-mic.ps1");
+    if !script_path.exists() {
+        return Ok("無需還原".to_string());
+    }
+
+    let output: std::process::Output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", script_path.to_str().unwrap_or(""),
+                "-Action", "restore",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+    }).await
+        .map_err(|e| format!("執行緒錯誤: {}", e))?
+        .map_err(|e| format!("還原失敗: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.contains("RESTORED") {
+        Ok("已還原預設麥克風".to_string())
+    } else {
+        Ok("無需還原".to_string())
+    }
 }
 
 /// Calculate RMS of audio samples
