@@ -5,20 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    {
-      "identifier": "http:default",
-      "allow": [
-        {
-          "url": "https://*.railway.app/**"
-        },
-        {
-          "url": "https://*.runpod.net/**"
-        },
-        {
-          "url": "https://*.proxy.runpod.net/**"
-        }
-      ]
-    }
+    "shell:allow-open"
   ]
 }
