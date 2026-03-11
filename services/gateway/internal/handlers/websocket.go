@@ -289,64 +289,55 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				voiceGender = "female"
 			}
 
-			// Mode 2: TTS 語音合成
-			if msg.Mode == 2 && voiceID != "" {
+			// Mode 2/3: TTS 語音合成（優先用 Edge TTS 快速合成，有自訂聲音才用 CosyVoice）
+			if msg.Mode >= 2 {
 				writeWSMessage(conn, WSMessage{
 					Type: "tts_status",
 					Data: fiber.Map{"status": "generating"},
 				})
 
-				audioURL, err := callGPUTTS(aiResponse.Text, voiceID, voiceGender)
-				if err != nil {
-					log.Printf("TTS 失敗: %v", err)
-					writeWSMessage(conn, WSMessage{
-						Type: "tts_status",
-						Data: fiber.Map{"status": "error", "error": err.Error()},
-					})
-				} else {
-					writeWSMessage(conn, WSMessage{
-						Type: "tts_audio",
-						Data: fiber.Map{
-							"audio_url":  audioURL,
-							"session_id": sessionID,
-						},
-					})
-				}
-			}
+				var audioURL string
+				var ttsErr error
 
-			// Mode 3: TTS + 臉部動畫（Wav2Lip）
-			if msg.Mode == 3 {
-				writeWSMessage(conn, WSMessage{
-					Type: "tts_status",
-					Data: fiber.Map{"status": "generating"},
-				})
+				// 判斷是否有自訂聲音模型（voiceID != "default" 表示已上傳聲音樣本）
+				useCustomVoice := voiceID != "" && voiceID != "default"
 
-				audioURL, videoURL, err := callGPUAvatar(aiResponse.Text, voiceID, voiceGender, faceImageURL, sessionFaceBase64)
-				if err != nil {
-					log.Printf("Mode 3 Avatar 失敗: %v", err)
-					writeWSMessage(conn, WSMessage{
-						Type: "tts_status",
-						Data: fiber.Map{"status": "error", "error": err.Error()},
-					})
-				} else {
-					// 發送 TTS 音訊
-					writeWSMessage(conn, WSMessage{
-						Type: "tts_audio",
-						Data: fiber.Map{
-							"audio_url":  audioURL,
-							"session_id": sessionID,
-						},
-					})
-					// 發送 Avatar 影片（如果有生成）
-					if videoURL != "" {
-						writeWSMessage(conn, WSMessage{
-							Type: "avatar_video",
-							Data: fiber.Map{
-								"video_url":  videoURL,
-								"session_id": sessionID,
-							},
-						})
+				if useCustomVoice {
+					// 有自訂聲音：用 CosyVoice（慢但支援聲音克隆）
+					if msg.Mode == 3 {
+						var videoURL string
+						audioURL, videoURL, ttsErr = callGPUAvatar(aiResponse.Text, voiceID, voiceGender, faceImageURL, sessionFaceBase64)
+						if ttsErr == nil && videoURL != "" {
+							writeWSMessage(conn, WSMessage{
+								Type: "avatar_video",
+								Data: fiber.Map{
+									"video_url":  videoURL,
+									"session_id": sessionID,
+								},
+							})
+						}
+					} else {
+						audioURL, ttsErr = callGPUTTS(aiResponse.Text, voiceID, voiceGender)
 					}
+				} else {
+					// 無自訂聲音：用 Edge TTS（快速，<1 秒）
+					audioURL, ttsErr = callFastTTS(aiResponse.Text, voiceGender)
+				}
+
+				if ttsErr != nil {
+					log.Printf("TTS 失敗: %v", ttsErr)
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_status",
+						Data: fiber.Map{"status": "error", "error": ttsErr.Error()},
+					})
+				} else if audioURL != "" {
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio",
+						Data: fiber.Map{
+							"audio_url":  audioURL,
+							"session_id": sessionID,
+						},
+					})
 				}
 			}
 
@@ -457,6 +448,42 @@ func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 str
 		videoURL = gpuServiceURL + gpuResp.Data.VideoURL
 	}
 	return audioURL, videoURL, nil
+}
+
+// callFastTTS 呼叫 Edge TTS 快速語音合成（<1 秒，無需 GPU）
+func callFastTTS(text, voiceGender string) (string, error) {
+	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
+	if gpuServiceURL == "" {
+		gpuServiceURL = "http://localhost:8002"
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_gender": voiceGender,
+	})
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(
+		gpuServiceURL+"/api/v1/tts/fast-synthesize",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Edge TTS 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return "", fmt.Errorf("解析 Edge TTS 回應失敗: %w", err)
+	}
+
+	return gpuServiceURL + gpuResp.Data.AudioURL, nil
 }
 
 // callAIService 呼叫 Python LLM 服務

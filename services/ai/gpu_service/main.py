@@ -461,5 +461,27 @@ async def models_status():
     }
 
 
+# ============== 快速 TTS（Edge TTS） ==============
+
+class FastTTSRequest(BaseModel):
+    text: str
+    voice_gender: str = "female"  # "male" 或 "female"
+
+
+@app.post("/api/v1/tts/fast-synthesize")
+async def fast_synthesize_speech(request: FastTTSRequest):
+    """快速語音合成（Edge TTS，<1 秒），適合不需要聲音克隆的場景"""
+    try:
+        from edge_tts_handler import fast_synthesize
+        output_path = await fast_synthesize(request.text, request.voice_gender)
+        filename = Path(output_path).name
+        return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+    except ImportError:
+        raise HTTPException(503, "Edge TTS 未安裝（pip install edge-tts）")
+    except Exception as e:
+        logger.error(f"Edge TTS 失敗: {e}")
+        raise HTTPException(500, f"快速語音合成失敗: {str(e)}")
+
+
 # ============== 靜態檔案（提供音訊/影片下載） ==============
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")

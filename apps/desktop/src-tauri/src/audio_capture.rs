@@ -34,7 +34,7 @@ pub fn start_capture() -> Result<mpsc::Receiver<AudioChunk>, String> {
 
     std::thread::spawn(move || {
         let mut buffer: Vec<f32> = Vec::new();
-        let chunk_size = sample_rate as usize * 3; // 3 seconds of audio
+        let chunk_size = (sample_rate as f32 * 1.5) as usize; // 1.5 秒（加速回應速度）
         // 跳過前 1 秒的音訊（避免擷取到啟動前的殘留聲音）
         let skip_samples = sample_rate as usize;
         let mut skipped: usize = 0;
