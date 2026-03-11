@@ -140,10 +140,20 @@ export default function SessionPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
               </svg>
             </div>
-            <h3 className="text-xl font-bold mb-2">準備開始會議</h3>
+            <h3 className="text-xl font-bold mb-2">AI 會議助手</h3>
             <p className="text-gray-500 mb-4 max-w-md">
-              選擇模式後啟動 AI 分身會議。
+              搭配 Zoom、Google Meet 或任何線上會議使用。
+              開啟此視窗放在旁邊，AI 會即時提供回答建議。
             </p>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 max-w-md mx-auto text-left">
+              <p className="text-sm font-medium text-blue-800 mb-1">使用方式：</p>
+              <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
+                <li>打開 Zoom / Google Meet / Teams 加入會議</li>
+                <li>在這裡選擇模式並點擊「開始會議」</li>
+                <li>將對方說的話輸入（或用桌面版自動語音辨識）</li>
+                <li>AI 即時給你回答建議，你決定是否採用</li>
+              </ol>
+            </div>
 
             {/* 模式選擇 */}
             <div className="grid grid-cols-3 gap-3 mb-6 max-w-lg mx-auto">
@@ -155,7 +165,7 @@ export default function SessionPage() {
               >
                 <div className="font-bold text-sm mb-1">Mode 1</div>
                 <div className="text-xs text-gray-500">Prompt 提詞</div>
-                <div className="text-xs text-gray-400 mt-1">AI 建議文字</div>
+                <div className="text-xs text-gray-400 mt-1">AI 顯示建議文字，你自己講</div>
               </button>
               <button
                 onClick={() => setMode(2)}
@@ -164,8 +174,8 @@ export default function SessionPage() {
                 }`}
               >
                 <div className="font-bold text-sm mb-1">Mode 2</div>
-                <div className="text-xs text-gray-500">Avatar 分身</div>
-                <div className="text-xs text-gray-400 mt-1">AI 自動回答</div>
+                <div className="text-xs text-gray-500">語音分身</div>
+                <div className="text-xs text-gray-400 mt-1">AI 用你的聲音自動回答</div>
               </button>
               <button
                 onClick={() => setMode(3)}
@@ -174,13 +184,13 @@ export default function SessionPage() {
                 }`}
               >
                 <div className="font-bold text-sm mb-1">Mode 3</div>
-                <div className="text-xs text-gray-500">Full 完整</div>
-                <div className="text-xs text-gray-400 mt-1">換臉+換聲+換背景</div>
+                <div className="text-xs text-gray-500">完整分身</div>
+                <div className="text-xs text-gray-400 mt-1">AI 臉+聲音完全替你開會</div>
               </button>
             </div>
             {mode >= 2 && (
               <p className="text-xs text-amber-600 bg-amber-50 px-4 py-2 rounded-lg mb-4 max-w-md mx-auto">
-                Mode {mode} 需要 GPU 服務 + 桌面應用程式（Tauri）才能運作
+                Mode {mode} 需要 GPU 服務運行中。語音會透過桌面版 App 播放到會議中。
               </p>
             )}
 
