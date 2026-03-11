@@ -20,6 +20,8 @@ fn main() {
             api_login,
             api_start_session,
             api_end_session,
+            install_vb_cable,
+            install_obs,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -268,6 +270,116 @@ async fn api_end_session(api_url: String, token: String, session_id: String) -> 
         .send()
         .await;
     Ok(())
+}
+
+/// 一鍵安裝 VB-Cable（下載 zip → 解壓 → 執行安裝）
+#[tauri::command]
+async fn install_vb_cable(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Emitter;
+    app.emit("install-progress", "正在下載 VB-Cable...").ok();
+
+    let url = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip";
+    let tmp_dir = std::env::temp_dir().join("ai-avatar-vbcable");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let zip_path = tmp_dir.join("VBCABLE_Driver_Pack43.zip");
+
+    // Download
+    let client = reqwest::Client::new();
+    let resp = client.get(url)
+        .timeout(std::time::Duration::from_secs(120))
+        .send().await
+        .map_err(|e| format!("下載失敗: {}", e))?;
+    let bytes = resp.bytes().await
+        .map_err(|e| format!("下載失敗: {}", e))?;
+    std::fs::write(&zip_path, &bytes)
+        .map_err(|e| format!("寫入失敗: {}", e))?;
+
+    app.emit("install-progress", "正在解壓縮...").ok();
+
+    // Extract zip
+    let file = std::fs::File::open(&zip_path)
+        .map_err(|e| format!("開啟 zip 失敗: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("解壓失敗: {}", e))?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)
+            .map_err(|e| format!("解壓失敗: {}", e))?;
+        let out_path = tmp_dir.join(entry.mangled_name());
+        if entry.is_dir() {
+            let _ = std::fs::create_dir_all(&out_path);
+        } else {
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut out_file = std::fs::File::create(&out_path)
+                .map_err(|e| format!("寫入失敗: {}", e))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("寫入失敗: {}", e))?;
+        }
+    }
+
+    app.emit("install-progress", "正在安裝 VB-Cable（需要管理員權限）...").ok();
+
+    // Run installer (requires admin — use runas)
+    let setup_exe = tmp_dir.join("VBCABLE_Setup_x64.exe");
+    if !setup_exe.exists() {
+        return Err("找不到 VBCABLE_Setup_x64.exe，請手動安裝".to_string());
+    }
+
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "/wait", setup_exe.to_str().unwrap_or("")])
+        .status()
+        .map_err(|e| format!("執行安裝程式失敗: {}", e))?;
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    if status.success() {
+        Ok("VB-Cable 安裝完成".to_string())
+    } else {
+        Ok("安裝程式已執行，請確認是否安裝成功".to_string())
+    }
+}
+
+/// 一鍵安裝 OBS Studio（下載安裝檔 → 執行）
+#[tauri::command]
+async fn install_obs(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Emitter;
+    app.emit("install-progress", "正在下載 OBS Studio...").ok();
+
+    // OBS installer URL (stable release)
+    let url = "https://cdn-fastly.obsproject.com/downloads/OBS-Studio-31.0.1-Windows-Installer.exe";
+    let tmp_dir = std::env::temp_dir().join("ai-avatar-obs");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let installer_path = tmp_dir.join("OBS-Studio-Installer.exe");
+
+    // Download
+    let client = reqwest::Client::new();
+    let resp = client.get(url)
+        .timeout(std::time::Duration::from_secs(300))
+        .send().await
+        .map_err(|e| format!("下載失敗: {}", e))?;
+    let bytes = resp.bytes().await
+        .map_err(|e| format!("下載失敗: {}", e))?;
+    std::fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("寫入失敗: {}", e))?;
+
+    app.emit("install-progress", "正在安裝 OBS Studio...").ok();
+
+    // Run installer
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "/wait", installer_path.to_str().unwrap_or("")])
+        .status()
+        .map_err(|e| format!("執行安裝程式失敗: {}", e))?;
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    if status.success() {
+        Ok("OBS Studio 安裝完成".to_string())
+    } else {
+        Ok("安裝程式已執行，請確認是否安裝成功".to_string())
+    }
 }
 
 /// Calculate RMS of audio samples
