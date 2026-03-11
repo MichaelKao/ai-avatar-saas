@@ -34,7 +34,7 @@ class GPTHandler:
             model=model,
             messages=full_messages,
             temperature=temperature,
-            max_tokens=1024,
+            max_tokens=512,
         )
 
         return {
@@ -63,7 +63,7 @@ class GPTHandler:
             model=model,
             messages=full_messages,
             temperature=temperature,
-            max_tokens=1024,
+            max_tokens=512,
             stream=True,
         )
 

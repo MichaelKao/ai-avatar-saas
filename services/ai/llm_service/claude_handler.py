@@ -30,7 +30,7 @@ class ClaudeHandler:
 
         response = await self.client.messages.create(
             model=model,
-            max_tokens=2048,
+            max_tokens=512,
             system=system_prompt,
             messages=messages,
             temperature=temperature,
@@ -58,7 +58,7 @@ class ClaudeHandler:
 
         async with self.client.messages.stream(
             model=model,
-            max_tokens=2048,
+            max_tokens=512,
             system=system_prompt,
             messages=messages,
             temperature=temperature,
