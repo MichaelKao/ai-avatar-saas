@@ -33,7 +33,7 @@ for d in [MODEL_DIR, UPLOAD_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Whisper STT 設定
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
 
 # 全域模型變數
 cosyvoice_model = None
