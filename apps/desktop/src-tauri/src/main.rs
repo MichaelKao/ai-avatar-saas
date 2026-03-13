@@ -131,16 +131,49 @@ async fn start_auto_mode(
     let mut rx = audio_capture::start_capture()?;
 
     let app_clone = app.clone();
+    let gpu_url_clone = gpu_url.clone();
+
+    // 送出除錯訊息：顯示 GPU URL
+    {
+        use tauri::Emitter;
+        app_clone.emit("debug-log", &format!("GPU URL: {}", gpu_url_clone)).ok();
+        app_clone.emit("debug-log", "音訊擷取已啟動，等待音訊...").ok();
+    }
+
+    // 追蹤音訊 chunk 計數
+    let chunk_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let chunk_count_clone = chunk_count.clone();
+
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
+            let count = chunk_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+
             // 跳過靜音（檢查 RMS 音量）
             let rms = calculate_rms(&chunk.data);
+
+            // 每個 chunk 都報告音量（前 5 個 + 之後每 10 個報告一次）
+            if count <= 5 || count % 10 == 0 {
+                use tauri::Emitter;
+                app_clone.emit("debug-log", &format!(
+                    "音訊 #{}: {} 取樣, RMS={:.0} {}",
+                    count,
+                    chunk.data.len(),
+                    rms,
+                    if rms < 500.0 { "(靜音，跳過)" } else { "(有聲音，送 STT)" }
+                )).ok();
+            }
+
             if rms < 500.0 {
                 continue;
             }
 
             // 送到 STT 辨識
-            match stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url).await {
+            {
+                use tauri::Emitter;
+                app_clone.emit("debug-log", &format!("正在送 STT... (RMS={:.0})", rms)).ok();
+            }
+
+            match stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url_clone).await {
                 Ok(text) => {
                     let text = text.trim().to_string();
                     if !text.is_empty() && text.len() > 1 {
@@ -164,6 +197,7 @@ async fn start_auto_mode(
 
                         // 啟動新的 2 秒延遲傳送任務（縮短等待時間，加快回應速度）
                         let send_mode = mode;
+                        let app_for_timer = app_clone.clone();
                         let timer_handle = tokio::spawn(async move {
                             // 等待 2 秒，若期間沒有新的 STT 結果就送出
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -179,20 +213,30 @@ async fn start_auto_mode(
 
                             // 送出累積的完整文字到 WebSocket
                             if !accumulated_text.is_empty() {
+                                use tauri::Emitter;
+                                app_for_timer.emit("debug-log", &format!("送出到 AI: {}", &accumulated_text)).ok();
                                 if let Err(e) = websocket_client::send_message(&accumulated_text, send_mode).await {
-                                    eprintln!("自動傳送失敗: {}", e);
+                                    app_for_timer.emit("debug-log", &format!("WebSocket 傳送失敗: {}", e)).ok();
                                 }
                             }
                         });
 
                         state.pending_timer = Some(timer_handle);
+                    } else {
+                        use tauri::Emitter;
+                        app_clone.emit("debug-log", &format!("STT 回傳空白 (text={:?})", text)).ok();
                     }
                 }
                 Err(e) => {
-                    eprintln!("STT 失敗: {}", e);
+                    use tauri::Emitter;
+                    app_clone.emit("debug-log", &format!("STT 失敗: {}", e)).ok();
                 }
             }
         }
+
+        // 音訊擷取結束
+        use tauri::Emitter;
+        app_clone.emit("debug-log", "音訊擷取已結束").ok();
     });
 
     Ok("自動模式已啟動".to_string())

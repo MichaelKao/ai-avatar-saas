@@ -11,7 +11,7 @@ type Status = 'idle' | 'connecting' | 'active';
 type ObsStatus = 'off' | 'starting' | 'running';
 
 interface LogEntry {
-  type: 'stt' | 'ai-text' | 'ai-audio' | 'ai-video' | 'system';
+  type: 'stt' | 'ai-text' | 'ai-audio' | 'ai-video' | 'system' | 'debug';
   text: string;
   timestamp: number;
 }
@@ -389,6 +389,9 @@ function MainApp() {
   const [obsStatus, setObsStatus] = useState<ObsStatus>('off');
   const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
 
+  // 手動文字輸入（除錯用）
+  const [manualText, setManualText] = useState('');
+
   const screen: AppScreen = !token ? 'login' : !setupDone ? 'setup' : 'main';
 
   // -----------------------------------------------------------------------
@@ -481,6 +484,11 @@ function MainApp() {
       addLog('stt', `對方說：${event.payload}`);
     });
 
+    // 除錯事件（音訊擷取 + STT 狀態）
+    const unlisten5 = listen<string>('debug-log', (event) => {
+      addLog('debug', event.payload);
+    });
+
     // OBS 安裝進度
     const unlisten4 = listen<string>('obs-install-progress', (event) => {
       addLog('system', event.payload);
@@ -491,6 +499,7 @@ function MainApp() {
       unlisten2.then(fn => fn());
       unlisten3.then(fn => fn());
       unlisten4.then(fn => fn());
+      unlisten5.then(fn => fn());
     };
   }, []);
 
@@ -1143,12 +1152,14 @@ function MainApp() {
                         : log.type === 'ai-text' ? '#4ade80'
                         : log.type === 'ai-audio' ? '#c084fc'
                         : log.type === 'ai-video' ? '#fb923c'
+                        : log.type === 'debug' ? '#fbbf24'
                         : '#64748b',
                     }}>
                       {log.type === 'stt' ? '[聽到]'
                         : log.type === 'ai-text' ? '[AI]'
                         : log.type === 'ai-audio' ? '[語音]'
                         : log.type === 'ai-video' ? '[影片]'
+                        : log.type === 'debug' ? '[除錯]'
                         : '[系統]'}
                     </span>
                     <span>{log.text}</span>
@@ -1165,10 +1176,49 @@ function MainApp() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
+              gap: 8,
             }}>
-              <div style={{ fontSize: 12, color: '#64748b' }}>
+              <div style={{ fontSize: 12, color: '#64748b', flexShrink: 0 }}>
                 Mode {mode} | Session: {sessionId.slice(0, 8)}...
               </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!manualText.trim()) return;
+                addLog('stt', `手動輸入：${manualText}`);
+                try {
+                  await invoke('send_text', { text: manualText, mode });
+                  addLog('system', '已送出到 AI');
+                } catch (err: any) {
+                  addLog('system', `送出失敗: ${err}`);
+                }
+                setManualText('');
+              }} style={{ display: 'flex', gap: 6, flex: 1 }}>
+                <input
+                  value={manualText}
+                  onChange={e => setManualText(e.target.value)}
+                  placeholder="手動輸入文字測試 AI..."
+                  style={{
+                    flex: 1,
+                    padding: '6px 10px',
+                    borderRadius: 6,
+                    border: '1px solid #334155',
+                    background: '#1e293b',
+                    color: '#e2e8f0',
+                    fontSize: 12,
+                  }}
+                />
+                <button type="submit" style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: '#3b82f6',
+                  color: '#fff',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}>送出</button>
+              </form>
               <button onClick={handleStop} style={{
                 padding: '8px 24px',
                 borderRadius: 8,
@@ -1178,6 +1228,7 @@ function MainApp() {
                 fontSize: 14,
                 fontWeight: 600,
                 cursor: 'pointer',
+                flexShrink: 0,
               }}>
                 停止分身
               </button>
