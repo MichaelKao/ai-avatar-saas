@@ -6,6 +6,8 @@ from typing import AsyncGenerator
 
 import openai
 
+from claude_handler import _find_cut_position
+
 
 class GPTHandler:
     """處理 OpenAI GPT API 呼叫"""
@@ -53,7 +55,7 @@ class GPTHandler:
         messages: list[dict],
         temperature: float = 0.7,
     ) -> AsyncGenerator[str, None]:
-        """串流對話"""
+        """串流對話 — 逗號級切段，更快開始 TTS"""
         if not self.client:
             raise RuntimeError("OPENAI_API_KEY 未設定")
 
@@ -71,14 +73,13 @@ class GPTHandler:
         async for chunk in stream:
             if chunk.choices[0].delta.content:
                 buffer += chunk.choices[0].delta.content
-                while any(sep in buffer for sep in ["。", "？", "！", ".", "?", "!"]):
-                    for sep in ["。", "？", "！", ".", "?", "!"]:
-                        if sep in buffer:
-                            idx = buffer.index(sep) + len(sep)
-                            sentence = buffer[:idx]
-                            buffer = buffer[idx:]
-                            yield f"data: {json.dumps({'text': sentence}, ensure_ascii=False)}\n\n"
-                            break
+                while True:
+                    cut_pos = _find_cut_position(buffer)
+                    if cut_pos is None:
+                        break
+                    text_chunk = buffer[:cut_pos]
+                    buffer = buffer[cut_pos:]
+                    yield f"data: {json.dumps({'text': text_chunk}, ensure_ascii=False)}\n\n"
 
         if buffer.strip():
             yield f"data: {json.dumps({'text': buffer}, ensure_ascii=False)}\n\n"

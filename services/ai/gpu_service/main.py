@@ -39,12 +39,13 @@ WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
 cosyvoice_model = None
 wav2lip_model = None
 whisper_model = None
+musetalk_model = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """啟動時載入模型"""
-    global cosyvoice_model, wav2lip_model, whisper_model
+    global cosyvoice_model, wav2lip_model, whisper_model, musetalk_model
 
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
@@ -64,6 +65,14 @@ async def lifespan(app: FastAPI):
         logger.info("Wav2Lip 模型載入完成")
     except Exception as e:
         logger.warning(f"Wav2Lip 載入失敗（可能尚未安裝）: {e}")
+
+    # 載入 MuseTalk 模型（即時唇形動畫，取代 Wav2Lip）
+    try:
+        from musetalk_handler import MuseTalkHandler
+        musetalk_model = MuseTalkHandler(MODEL_DIR)
+        logger.info("MuseTalk 模型載入完成")
+    except Exception as e:
+        logger.warning(f"MuseTalk 載入失敗（可能尚未安裝）: {e}")
 
     # 載入 Whisper STT 模型（faster-whisper）
     try:
@@ -105,6 +114,7 @@ async def health():
         "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1) if torch.cuda.is_available() else 0,
         "cosyvoice_loaded": cosyvoice_model is not None,
         "wav2lip_loaded": wav2lip_model is not None,
+        "musetalk_loaded": musetalk_model is not None,
         "whisper_loaded": whisper_model is not None,
         "whisper_model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
     }
@@ -172,6 +182,54 @@ async def synthesize_speech_stream(request: TTSRequest):
             logger.error(f"串流合成失敗: {e}")
 
     return StreamingResponse(generate(), media_type="audio/wav")
+
+
+# ============== 串流 TTS（CosyVoice 2.0 串流模式） ==============
+
+class StreamTTSRequest(BaseModel):
+    text: str
+    voice_id: str = "default"
+    voice_gender: str = "female"  # "male" 或 "female"
+
+
+@app.post("/api/v1/tts/stream-synthesize")
+async def stream_synthesize_speech(request: StreamTTSRequest):
+    """串流語音合成 — 回傳 chunked PCM（22050Hz 16bit mono）
+    首 chunk < 100ms，適合即時串流播放
+    CosyVoice 載入失敗時自動回退到 Edge TTS（非串流）
+    """
+    if cosyvoice_model is None:
+        # 回退：CosyVoice 未載入，使用 Edge TTS
+        try:
+            from edge_tts_handler import fast_synthesize
+            output_path = await fast_synthesize(request.text, request.voice_gender)
+            filename = Path(output_path).name
+            return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+        except Exception as e:
+            raise HTTPException(503, f"CosyVoice 未載入且 Edge TTS 也失敗: {str(e)}")
+
+    async def generate():
+        try:
+            if request.voice_id == "default":
+                # 使用 SFT 內建聲音（最快，首 chunk < 100ms）
+                for chunk in cosyvoice_model.synthesize_stream_sft(
+                    request.text, request.voice_gender
+                ):
+                    yield chunk
+            else:
+                # 使用 zero-shot 克隆聲音
+                for chunk in cosyvoice_model.synthesize_stream(
+                    request.text, request.voice_id
+                ):
+                    yield chunk
+        except Exception as e:
+            logger.error(f"串流 TTS 失敗: {e}")
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/octet-stream",
+        headers={"X-Audio-Format": "pcm-22050-16bit-mono"},
+    )
 
 
 # ============== 語音識別 STT ==============
@@ -505,33 +563,6 @@ async def animate_from_audio(request: AnimateFromAudioRequest):
     return {"data": {"video_url": f"/outputs/{video_filename}"}, "error": None}
 
 
-# ============== 模型管理 ==============
-
-@app.get("/api/v1/models/status")
-async def models_status():
-    """查詢所有模型狀態"""
-    gpu_mem = None
-    if torch.cuda.is_available():
-        gpu_mem = {
-            "total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1),
-            "allocated_gb": round(torch.cuda.memory_allocated(0) / 1e9, 1),
-            "cached_gb": round(torch.cuda.memory_reserved(0) / 1e9, 1),
-        }
-
-    return {
-        "data": {
-            "cosyvoice": {"loaded": cosyvoice_model is not None},
-            "wav2lip": {"loaded": wav2lip_model is not None},
-            "whisper": {
-                "loaded": whisper_model is not None,
-                "model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
-            },
-            "gpu_memory": gpu_mem,
-        },
-        "error": None,
-    }
-
-
 # ============== 快速 TTS（Edge TTS） ==============
 
 class FastTTSRequest(BaseModel):
@@ -600,6 +631,117 @@ async def concatenate_audio(request: ConcatenateRequest):
     except Exception as e:
         logger.error(f"音訊合併失敗: {e}")
         raise HTTPException(500, f"音訊合併失敗: {str(e)}")
+
+
+# ============== MuseTalk 即時唇形動畫 ==============
+
+class PrepareFaceRequest(BaseModel):
+    face_id: str  # Session ID 或自訂 ID
+    face_image_base64: str  # base64 JPEG
+
+
+@app.post("/api/v1/avatar/prepare-face")
+async def prepare_face(request: PrepareFaceRequest):
+    """預處理臉部特徵（Session 開始時呼叫一次）
+    回傳 face_id + bbox，後續用 face_id 進行即時唇形動畫
+    """
+    if musetalk_model is None:
+        raise HTTPException(503, "MuseTalk 模型未載入")
+
+    try:
+        img_data = base64.b64decode(request.face_image_base64)
+        result = musetalk_model.prepare_face(request.face_id, img_data)
+        return {"data": result, "error": None}
+    except Exception as e:
+        logger.error(f"臉部預處理失敗: {e}")
+        raise HTTPException(500, f"臉部預處理失敗: {str(e)}")
+
+
+class StreamLipsyncRequest(BaseModel):
+    face_id: str
+    audio_url: str  # 音訊檔案相對路徑
+
+
+@app.post("/api/v1/avatar/stream-lipsync")
+async def stream_lipsync(request: StreamLipsyncRequest):
+    """串流唇形動畫 — 回傳 MJPEG 串流
+    每幀 30-50ms 生成，適合即時顯示
+    """
+    if musetalk_model is None:
+        raise HTTPException(503, "MuseTalk 模型未載入")
+
+    # 解析音訊路徑
+    audio_relative = request.audio_url.lstrip("/")
+    if audio_relative.startswith("outputs/"):
+        audio_relative = audio_relative[len("outputs/"):]
+    audio_path = OUTPUT_DIR / audio_relative
+
+    if not audio_path.exists():
+        raise HTTPException(404, f"音訊檔案不存在: {request.audio_url}")
+
+    # 讀取音訊，切成 ~33ms chunks（每幀 30fps）
+    import wave
+
+    try:
+        with wave.open(str(audio_path), "rb") as wf:
+            sr = wf.getframerate()
+            audio_bytes = wf.readframes(wf.getnframes())
+    except Exception:
+        # 非標準 WAV，用 numpy 讀
+        audio_data = np.fromfile(str(audio_path), dtype=np.int16)
+        audio_bytes = audio_data.tobytes()
+        sr = 16000  # 假設 16kHz
+
+    # 切成每幀 ~33ms 的 chunks
+    frame_samples = int(sr * 0.033)  # 30fps
+    frame_bytes = frame_samples * 2  # 16bit
+
+    def audio_chunks():
+        for i in range(0, len(audio_bytes), frame_bytes):
+            yield audio_bytes[i : i + frame_bytes]
+
+    async def generate():
+        for jpeg_frame in musetalk_model.generate_frames_stream(
+            request.face_id, audio_chunks()
+        ):
+            # MJPEG 格式：每幀以 boundary 分隔
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + jpeg_frame + b"\r\n"
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+# ============== 模型管理 ==============
+
+@app.get("/api/v1/models/status")
+async def models_status():
+    """查詢所有模型狀態（含 MuseTalk）"""
+    gpu_mem = None
+    if torch.cuda.is_available():
+        gpu_mem = {
+            "total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1),
+            "allocated_gb": round(torch.cuda.memory_allocated(0) / 1e9, 1),
+            "cached_gb": round(torch.cuda.memory_reserved(0) / 1e9, 1),
+        }
+
+    return {
+        "data": {
+            "cosyvoice": {"loaded": cosyvoice_model is not None},
+            "wav2lip": {"loaded": wav2lip_model is not None},
+            "musetalk": {"loaded": musetalk_model is not None},
+            "whisper": {
+                "loaded": whisper_model is not None,
+                "model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
+            },
+            "gpu_memory": gpu_mem,
+        },
+        "error": None,
+    }
 
 
 # ============== 靜態檔案（提供音訊/影片下載） ==============

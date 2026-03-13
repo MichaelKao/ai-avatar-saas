@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,12 +33,13 @@ type WSMessage struct {
 
 // TranscriptionMessage 語音辨識文字訊息
 type TranscriptionMessage struct {
-	Text             string `json:"text"`
-	SessionID        string `json:"session_id"`
-	Language         string `json:"language"`
-	Mode             int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
-	VoiceGender      string `json:"voice_gender,omitempty"`       // "male" 或 "female"
-	FaceImageBase64  string `json:"face_image_base64,omitempty"`  // 即時 webcam 截圖
+	Text            string `json:"text"`
+	SessionID       string `json:"session_id"`
+	Language        string `json:"language"`
+	Mode            int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
+	VoiceGender     string `json:"voice_gender,omitempty"`      // "male" 或 "female"
+	FaceImageBase64 string `json:"face_image_base64,omitempty"` // 即時 webcam 截圖
+	MsgType         string `json:"type,omitempty"`               // "interrupt" 等控制訊息
 }
 
 // AIServiceRequest 呼叫 AI 服務的請求
@@ -229,6 +231,10 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		// 用 channel 做訊息排程，新訊息取消舊的處理
 		msgChan := make(chan TranscriptionMessage, 10)
 
+		// 進行中的 pipeline 可取消（打斷機制）
+		var cancelMu sync.Mutex
+		var cancelFunc context.CancelFunc
+
 		// 背景 goroutine 處理訊息（只處理最新的，跳過積壓的舊訊息）
 		go func() {
 			for msg := range msgChan {
@@ -260,11 +266,23 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					Data: fiber.Map{"status": "start"},
 				})
 
+				// 建立可取消的 context
+				ctx, cancel := context.WithCancel(context.Background())
+				cancelMu.Lock()
+				cancelFunc = cancel
+				cancelMu.Unlock()
+
 				h.processStreamingPipeline(
-					conn, httpClient, latest, sessionID, userID,
+					ctx, conn, httpClient, latest, sessionID, userID,
 					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
 				)
+
+				// Pipeline 完成，清除 cancel
+				cancelMu.Lock()
+				cancelFunc = nil
+				cancelMu.Unlock()
+				cancel()
 
 				h.db.Exec(
 					`UPDATE meeting_sessions SET total_responses = total_responses + 1
@@ -284,6 +302,17 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				break
 			}
 
+			// 處理打斷訊息
+			if msg.MsgType == "interrupt" {
+				log.Printf("收到打斷訊息")
+				cancelMu.Lock()
+				if cancelFunc != nil {
+					cancelFunc()
+				}
+				cancelMu.Unlock()
+				continue
+			}
+
 			// 設定 SessionID
 			if msg.SessionID == "" {
 				msg.SessionID = sessionID
@@ -300,6 +329,13 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			}
 
 			log.Printf("收到訊息: %s", msg.Text)
+
+			// 取消進行中的 pipeline（新訊息覆蓋舊的）
+			cancelMu.Lock()
+			if cancelFunc != nil {
+				cancelFunc()
+			}
+			cancelMu.Unlock()
 
 			// 送到處理 channel（非阻塞，積壓的會被跳過）
 			select {
@@ -508,9 +544,10 @@ type ttsResult struct {
 	index    int
 }
 
-// processStreamingPipeline 串流 LLM + 句子級並行 TTS Pipeline
-// 核心優化：LLM 邊生成邊觸發 TTS，第一句話到達就開始合成語音
+// processStreamingPipeline 串流 LLM + 逐句 TTS 即時派發 Pipeline
+// 核心優化：LLM 逗號級切段 → 每段立刻 TTS → 立刻送 tts_audio_chunk 給 client
 func (h *WebSocketHandler) processStreamingPipeline(
+	ctx context.Context,
 	conn *websocket.Conn,
 	httpClient *http.Client,
 	msg TranscriptionMessage,
@@ -540,7 +577,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		Language:     language,
 	})
 
-	streamReq, _ := http.NewRequest("POST", aiServiceURL+"/api/v1/generate/stream", bytes.NewBuffer(reqBody))
+	streamReq, _ := http.NewRequestWithContext(ctx, "POST", aiServiceURL+"/api/v1/generate/stream", bytes.NewBuffer(reqBody))
 	streamReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(streamReq)
@@ -560,13 +597,25 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	// 讀取 SSE 串流，逐句處理
 	var sentences []string
 	var fullText strings.Builder
-	var ttsResultChans []chan ttsResult
-	var mu sync.Mutex
+	var ttsWg sync.WaitGroup
+	sentenceIndex := 0
 
 	startTime := time.Now()
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
+		// 檢查 context 是否已取消（打斷）
+		select {
+		case <-ctx.Done():
+			log.Printf("Pipeline 被打斷")
+			writeWSMessage(conn, WSMessage{
+				Type: "thinking_animation",
+				Data: fiber.Map{"status": "stop"},
+			})
+			return
+		default:
+		}
+
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -584,7 +633,8 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		}
 
 		sentence := event.Text
-		sentenceIdx := len(sentences)
+		idx := sentenceIndex
+		sentenceIndex++
 		sentences = append(sentences, sentence)
 		fullText.WriteString(sentence)
 
@@ -597,14 +647,19 @@ func (h *WebSocketHandler) processStreamingPipeline(
 			},
 		})
 
-		// Mode 2/3: 每個句子立刻啟動 TTS（與 LLM 生成並行）
+		// Mode 2/3: 每個句子立刻啟動 TTS → 完成後立刻送 tts_audio_chunk
 		if msg.Mode >= 2 {
-			ch := make(chan ttsResult, 1)
-			mu.Lock()
-			ttsResultChans = append(ttsResultChans, ch)
-			mu.Unlock()
+			ttsWg.Add(1)
+			go func(s string, i int) {
+				defer ttsWg.Done()
 
-			go func(s string, idx int, resCh chan<- ttsResult) {
+				// 檢查是否已取消
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				var url string
 				var ttsErr error
 				if useCustomVoice {
@@ -612,8 +667,46 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				} else {
 					url, ttsErr = callFastTTS(s, voiceGender)
 				}
-				resCh <- ttsResult{audioURL: url, err: ttsErr, index: idx}
-			}(sentence, sentenceIdx, ch)
+
+				if ttsErr != nil {
+					log.Printf("TTS 第 %d 句失敗: %v", i, ttsErr)
+					return
+				}
+
+				if url == "" {
+					return
+				}
+
+				// 立刻送出這一段音訊給 client（不等其他句子）
+				writeWSMessage(conn, WSMessage{
+					Type: "tts_audio_chunk",
+					Data: fiber.Map{
+						"audio_url":  url,
+						"index":      i,
+						"session_id": sessionID,
+					},
+				})
+
+				// Mode 3: 同時觸發 MuseTalk/Wav2Lip
+				if msg.Mode == 3 {
+					go func(aURL, fURL, fBase64, sid string) {
+						vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
+						if wErr != nil {
+							log.Printf("唇形動畫失敗: %v", wErr)
+							return
+						}
+						if vURL != "" {
+							writeWSMessage(conn, WSMessage{
+								Type: "avatar_video",
+								Data: fiber.Map{
+									"video_url":  vURL,
+									"session_id": sid,
+								},
+							})
+						}
+					}(url, faceImageURL, sessionFaceBase64, sessionID)
+				}
+			}(sentence, idx)
 		}
 	}
 
@@ -642,93 +735,18 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 	log.Printf("串流 LLM 完成: %d 句, %dms", len(sentences), llmElapsed.Milliseconds())
 
-	// Mode 2/3: 收集所有 TTS 結果並合併音訊
-	if msg.Mode >= 2 && len(ttsResultChans) > 0 {
+	// 等待所有 TTS goroutine 完成
+	if msg.Mode >= 2 {
+		ttsWg.Wait()
+
+		// 發送串流結束信號
 		writeWSMessage(conn, WSMessage{
-			Type: "tts_status",
-			Data: fiber.Map{"status": "generating"},
+			Type: "tts_stream_end",
+			Data: fiber.Map{
+				"session_id":    sessionID,
+				"total_chunks":  len(sentences),
+			},
 		})
-
-		// 收集所有句子的音訊 URL（按順序）
-		audioURLs := make([]string, len(ttsResultChans))
-		for i, ch := range ttsResultChans {
-			result := <-ch
-			if result.err != nil {
-				log.Printf("TTS 第 %d 句失敗: %v", i, result.err)
-				continue
-			}
-			audioURLs[i] = result.audioURL
-		}
-
-		// 過濾空值
-		var validAudioURLs []string
-		for _, url := range audioURLs {
-			if url != "" {
-				validAudioURLs = append(validAudioURLs, url)
-			}
-		}
-
-		if len(validAudioURLs) == 0 {
-			writeWSMessage(conn, WSMessage{
-				Type: "tts_status",
-				Data: fiber.Map{"status": "error", "error": "所有句子 TTS 失敗"},
-			})
-			return
-		}
-
-		// 如果只有一段音訊，直接送出
-		var finalAudioURL string
-		if len(validAudioURLs) == 1 {
-			finalAudioURL = validAudioURLs[0]
-		} else {
-			// 多段音訊：呼叫合併端點
-			relativeURLs := make([]string, len(validAudioURLs))
-			for i, url := range validAudioURLs {
-				if strings.HasPrefix(url, gpuServiceURL) {
-					relativeURLs[i] = url[len(gpuServiceURL):]
-				} else {
-					relativeURLs[i] = url
-				}
-			}
-
-			concatURL, concatErr := callConcatenateAudio(httpClient, gpuServiceURL, relativeURLs)
-			if concatErr != nil {
-				log.Printf("音訊合併失敗: %v，使用第一段", concatErr)
-				finalAudioURL = validAudioURLs[0]
-			} else {
-				finalAudioURL = concatURL
-			}
-		}
-
-		if finalAudioURL != "" {
-			writeWSMessage(conn, WSMessage{
-				Type: "tts_audio",
-				Data: fiber.Map{
-					"audio_url":  finalAudioURL,
-					"session_id": sessionID,
-				},
-			})
-
-			// Mode 3: Wav2Lip 背景執行
-			if msg.Mode == 3 {
-				go func(aURL, fURL, fBase64, sid string) {
-					vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
-					if wErr != nil {
-						log.Printf("Wav2Lip 背景失敗: %v", wErr)
-						return
-					}
-					if vURL != "" {
-						writeWSMessage(conn, WSMessage{
-							Type: "avatar_video",
-							Data: fiber.Map{
-								"video_url":  vURL,
-								"session_id": sid,
-							},
-						})
-					}
-				}(finalAudioURL, faceImageURL, sessionFaceBase64, sessionID)
-			}
-		}
 	}
 
 	log.Printf("Pipeline 完成: LLM=%dms, 句子=%d", llmElapsed.Milliseconds(), len(sentences))

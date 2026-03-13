@@ -117,7 +117,7 @@ class CosyVoiceHandler:
         logger.info(f"語音合成完成: {output_path}")
 
     def synthesize_stream(self, text: str, voice_id: str):
-        """串流語音合成（逐句）"""
+        """串流語音合成（逐句，zero-shot 模式）"""
         profile_path = self.voice_profiles.get(voice_id)
         if not profile_path:
             raise ValueError(f"找不到聲音檔案: {voice_id}")
@@ -132,5 +132,21 @@ class CosyVoiceHandler:
         for result in output:
             tts_speech = result["tts_speech"]
             # 轉成 bytes 串流
+            audio_bytes = (tts_speech.numpy() * 32767).astype(np.int16).tobytes()
+            yield audio_bytes
+
+    def synthesize_stream_sft(self, text: str, voice_gender: str = "female"):
+        """串流語音合成（SFT 內建聲音模式，首 chunk < 100ms）"""
+        speaker = self.GENDER_SPEAKER_MAP.get(voice_gender, "中文女")
+
+        output = self.model.inference_sft(
+            tts_text=text,
+            spk_id=speaker,
+            stream=True,
+        )
+
+        for result in output:
+            tts_speech = result["tts_speech"]
+            # 轉成 16bit PCM bytes（22050Hz mono）
             audio_bytes = (tts_speech.numpy() * 32767).astype(np.int16).tobytes()
             yield audio_bytes

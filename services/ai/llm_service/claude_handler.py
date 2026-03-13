@@ -7,6 +7,14 @@ from typing import AsyncGenerator
 import anthropic
 
 
+# 句子級分隔符（優先級高 → 遇到就切）
+SENTENCE_SEPARATORS = ["。", "？", "！", ".", "?", "!"]
+# 逗號級分隔符（最小 chunk 5 字元才切）
+CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";"]
+# 最小 chunk 長度（避免碎片）
+MIN_CHUNK_LEN = 5
+
+
 class ClaudeHandler:
     """處理 Claude API 呼叫"""
 
@@ -52,7 +60,7 @@ class ClaudeHandler:
         messages: list[dict],
         temperature: float = 0.7,
     ) -> AsyncGenerator[str, None]:
-        """串流對話 — 逐句輸出"""
+        """串流對話 — 逗號級切段，更快開始 TTS"""
         if not self.client:
             raise RuntimeError("ANTHROPIC_API_KEY 未設定")
 
@@ -66,18 +74,51 @@ class ClaudeHandler:
             buffer = ""
             async for text in stream.text_stream:
                 buffer += text
-                # 句子級分割 — 遇到句號、問號、驚嘆號就輸出
-                while any(sep in buffer for sep in ["。", "？", "！", ".", "?", "!"]):
-                    for sep in ["。", "？", "！", ".", "?", "!"]:
-                        if sep in buffer:
-                            idx = buffer.index(sep) + len(sep)
-                            sentence = buffer[:idx]
-                            buffer = buffer[idx:]
-                            yield f"data: {json.dumps({'text': sentence}, ensure_ascii=False)}\n\n"
-                            break
+                # 嘗試切段：先找句子分隔符，再找逗號分隔符
+                while True:
+                    cut_pos = _find_cut_position(buffer)
+                    if cut_pos is None:
+                        break
+                    chunk = buffer[:cut_pos]
+                    buffer = buffer[cut_pos:]
+                    yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
 
             # 輸出剩餘文字
             if buffer.strip():
                 yield f"data: {json.dumps({'text': buffer}, ensure_ascii=False)}\n\n"
 
             yield "data: [DONE]\n\n"
+
+
+def _find_cut_position(buffer: str) -> int | None:
+    """找到最佳切段位置
+    1. 句子分隔符（。？！.?!）→ 任何長度都切
+    2. 逗號分隔符（，、；,;）→ 至少 MIN_CHUNK_LEN 字元才切
+    """
+    # 先找句子分隔符（最早出現的）
+    earliest_sentence = None
+    for sep in SENTENCE_SEPARATORS:
+        pos = buffer.find(sep)
+        if pos >= 0:
+            cut = pos + len(sep)
+            if earliest_sentence is None or cut < earliest_sentence:
+                earliest_sentence = cut
+
+    if earliest_sentence is not None:
+        return earliest_sentence
+
+    # 再找逗號分隔符（需要最小長度）
+    if len(buffer) >= MIN_CHUNK_LEN:
+        earliest_clause = None
+        for sep in CLAUSE_SEPARATORS:
+            pos = buffer.find(sep)
+            if pos >= 0:
+                cut = pos + len(sep)
+                if cut >= MIN_CHUNK_LEN:
+                    if earliest_clause is None or cut < earliest_clause:
+                        earliest_clause = cut
+
+        if earliest_clause is not None:
+            return earliest_clause
+
+    return None

@@ -46,50 +46,56 @@
 ## 技術棧
 Go 1.22 (Fiber) / Python 3.11 (FastAPI) / Next.js 14 / Tauri 2 (Rust)
 PostgreSQL 16 / Redis 7 / Stripe / Claude API / OpenAI API
-CosyVoice 2.0 (TTS) / Wav2Lip (臉部動畫) / faster-whisper large-v3 (STT)
+CosyVoice 2.0 (TTS) / Wav2Lip + MuseTalk (臉部動畫) / faster-whisper large-v3 (STT)
 
 ## 專案結構
 - `apps/web/` — Next.js 14 前端（Vercel 部署）
 - `apps/desktop/` — Tauri 2 桌面 App（Windows，含 VB-Cable 安裝）
-  - `src-tauri/src/main.rs` — Rust 後端（音訊擷取、STT、VB-Cable 播放）
+  - `src-tauri/src/main.rs` — Rust 後端（VAD 語音偵測、STT、串流播放）
+  - `src-tauri/src/vad.rs` — 能量閾值 VAD（取代固定 5 秒 chunk + 4 秒 debounce）
+  - `src-tauri/src/audio_capture.rs` — WASAPI Loopback 擷取 + 即時重取樣 + VAD
+  - `src-tauri/src/audio_player.rs` — 串流音訊播放器（邊收邊播 + 打斷）
+  - `src-tauri/src/websocket_client.rs` — WebSocket 客戶端（tts_audio_chunk 自動入隊）
   - `src/App.tsx` — React 前端 UI
 - `services/gateway/` — Go API Gateway（Railway 部署）
-  - `internal/handlers/websocket.go` — WebSocket 即時通訊（核心流程）
+  - `internal/handlers/websocket.go` — WebSocket 即時通訊（核心串流 Pipeline）
   - `internal/handlers/session.go` — Session 管理
   - `internal/auth/` — JWT 認證
 - `services/ai/llm_service/` — Python LLM 服務（RunPod port 8002）
   - `main.py` — FastAPI，`/api/v1/generate` 端點
-  - `claude_handler.py` — Anthropic Claude
-  - `gpt_handler.py` — OpenAI GPT
+  - `claude_handler.py` — Anthropic Claude（逗號級切段串流）
+  - `gpt_handler.py` — OpenAI GPT（逗號級切段串流）
 - `services/ai/gpu_service/` — Python GPU 服務（RunPod port 8889→8888）
-  - `main.py` — FastAPI，TTS + Avatar 端點
+  - `main.py` — FastAPI，TTS + Avatar + STT 端點
   - `combined.py` — 合併 GPU + STT + LLM proxy 的入口
   - `stt_service.py` — Whisper STT
-  - `cosyvoice_handler.py` — CosyVoice 2.0 語音克隆
-  - `wav2lip_handler.py` — Wav2Lip 臉部動畫
+  - `cosyvoice_handler.py` — CosyVoice 2.0 語音克隆 + 串流 TTS
+  - `wav2lip_handler.py` — Wav2Lip 臉部動畫（回退用）
+  - `musetalk_handler.py` — MuseTalk 即時唇形動畫（30-50ms/frame）
 - `packages/shared-types/` — 共用 TypeScript 型別
 - `infrastructure/` — Docker + 部署腳本
 
-## 完整資料流（Mode 3 全自動）
+## 全串流資料流（Mode 2/3）
 ```
 LINE/Zoom/Teams/Meet 視訊通話
     ↓ 系統音訊
-桌面 App (WASAPI Loopback 擷取對方聲音)
-    ↓ PCM 16kHz WAV
+桌面 App (WASAPI Loopback → VAD 語音偵測 → 300ms 靜音切段)
+    ↓ 完整語句 PCM（~0.3s 延遲）
 RunPod Whisper STT (/api/v1/stt/transcribe)
-    ↓ 文字
+    ↓ 文字（無防抖，直接送出）
 桌面 App → WebSocket → Gateway
     ↓ 文字
-Gateway → LLM (/api/v1/generate) → AI 回覆文字
-    ↓
-Gateway → TTS (/api/v1/tts/synthesize) → 語音 WAV
-    ↓
-Gateway → Wav2Lip (/api/v1/avatar/generate-talking) → 臉部動畫影片
-    ↓ audio_url + video_url
-WebSocket → 桌面 App
-    ↓
-桌面 App → VB-Cable (cpal) → 虛擬麥克風 → 視訊 App 收到 AI 語音
+Gateway → LLM 串流 (/api/v1/generate/stream) → 逗號級切段 → 逐段 TTS
+    ↓ 每段 TTS 完成立即送 tts_audio_chunk
+WebSocket → 桌面 App (Rust 層自動下載 + 入隊播放)
+    ↓ gapless 串流播放
+桌面 App → VB-Cable → 虛擬麥克風 → 視訊 App 收到 AI 語音
 ```
+
+### 打斷機制
+- 用戶開始說話 → 桌面 App 發送 `interrupt` 訊息
+- Gateway 取消進行中的 LLM/TTS（context.WithCancel）
+- 桌面 App 取消音訊播放佇列
 
 ## API Keys & Tokens
 > **重要**：Repo 已公開，所有 token 和密鑰存放在 Claude memory 或 `.env` 檔案中，不要 commit 到 repo。
@@ -159,9 +165,15 @@ WebSocket → 桌面 App
 | `/health` | GET | 健康檢查 |
 | `/api/v1/stt/transcribe` | POST | 語音轉文字（Whisper large-v3） |
 | `/api/v1/generate` | POST | LLM 文字生成（proxy → port 8002） |
+| `/api/v1/generate/stream` | POST | LLM 串流生成（SSE，逗號級切段） |
 | `/api/v1/tts/synthesize` | POST | 語音合成（CosyVoice 2.0） |
+| `/api/v1/tts/fast-synthesize` | POST | 快速語音合成（Edge TTS） |
+| `/api/v1/tts/stream-synthesize` | POST | 串流語音合成（CosyVoice 串流，首 chunk < 100ms） |
 | `/api/v1/tts/clone-voice` | POST | 上傳語音樣本建立聲音模型 |
+| `/api/v1/tts/concatenate` | POST | 合併多段音訊 |
 | `/api/v1/avatar/generate-talking` | POST | TTS + Wav2Lip 臉部動畫 |
-| `/api/v1/avatar/generate-frame` | POST | 單幀臉部動畫 |
-| `/api/v1/models/status` | GET | GPU 模型狀態 |
+| `/api/v1/avatar/animate-from-audio` | POST | 從既有音訊生成臉部動畫 |
+| `/api/v1/avatar/prepare-face` | POST | 預處理臉部特徵（MuseTalk） |
+| `/api/v1/avatar/stream-lipsync` | POST | 串流唇形動畫（MuseTalk MJPEG） |
+| `/api/v1/models/status` | GET | GPU 模型狀態（含 MuseTalk） |
 | `/outputs/*` | GET | 靜態檔案（音訊/影片下載） |

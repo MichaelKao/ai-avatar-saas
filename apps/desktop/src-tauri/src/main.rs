@@ -6,6 +6,8 @@ mod audio_capture;
 mod stt_client;
 mod obs_virtual_cam;
 mod obs_manager;
+mod vad;
+mod audio_player;
 
 fn main() {
     tauri::Builder::default()
@@ -25,6 +27,8 @@ fn main() {
             install_vb_cable,
             auto_setup,
             play_audio_to_vbcable,
+            enqueue_audio_chunk,
+            cancel_audio_playback,
             open_avatar_window,
             close_avatar_window,
             emit_avatar_video,
@@ -89,45 +93,13 @@ fn get_status() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// STT 防抖緩衝區 — 累積 STT 文字，等待 2 秒無新結果後才送出
-struct DebounceState {
-    /// 累積的 STT 文字
-    buffer: String,
-    /// 正在等待的延遲傳送任務（2 秒計時器）
-    pending_timer: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// 全域防抖狀態（用 OnceLock + tokio::sync::Mutex 實作）
-fn debounce_state() -> &'static tokio::sync::Mutex<DebounceState> {
-    static STATE: std::sync::OnceLock<tokio::sync::Mutex<DebounceState>> = std::sync::OnceLock::new();
-    STATE.get_or_init(|| {
-        tokio::sync::Mutex::new(DebounceState {
-            buffer: String::new(),
-            pending_timer: None,
-        })
-    })
-}
-
-/// 清除防抖狀態（停止自動模式時呼叫）
-async fn clear_debounce() {
-    let mut state = debounce_state().lock().await;
-    // 取消尚未觸發的計時器
-    if let Some(handle) = state.pending_timer.take() {
-        handle.abort();
-    }
-    state.buffer.clear();
-}
-
-/// 啟動自動模式 — 擷取系統音訊 → STT → 防抖後自動傳送
+/// 啟動自動模式 — VAD 偵測語音結束 → STT → 直接送 AI（無防抖）
 #[tauri::command]
 async fn start_auto_mode(
     app: tauri::AppHandle,
     gpu_url: String,
     mode: i32,
 ) -> Result<String, String> {
-    // 啟動前先清除上一次的防抖狀態
-    clear_debounce().await;
-
     let mut rx = audio_capture::start_capture()?;
 
     let app_clone = app.clone();
@@ -137,32 +109,33 @@ async fn start_auto_mode(
     {
         use tauri::Emitter;
         app_clone.emit("debug-log", &format!("GPU URL: {}", gpu_url_clone)).ok();
-        app_clone.emit("debug-log", "音訊擷取已啟動，等待音訊...").ok();
+        app_clone.emit("debug-log", "VAD 語音偵測已啟動，等待語音...").ok();
     }
 
-    // 追蹤音訊 chunk 計數
-    let chunk_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let chunk_count_clone = chunk_count.clone();
+    // 追蹤語句計數
+    let utterance_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let utterance_count_clone = utterance_count.clone();
 
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
-            let count = chunk_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let count = utterance_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
-            // 跳過靜音（檢查 RMS 音量）
+            // 計算 RMS 確認有效語音
             let rms = calculate_rms(&chunk.data);
+            let duration_ms = chunk.data.len() as u64 * 1000 / chunk.sample_rate as u64;
 
-            // 每個 chunk 都報告音量（前 5 個 + 之後每 10 個報告一次）
-            if count <= 5 || count % 10 == 0 {
+            {
                 use tauri::Emitter;
                 app_clone.emit("debug-log", &format!(
-                    "音訊 #{}: {} 取樣, RMS={:.0} {}",
+                    "VAD 語句 #{}: {}ms, RMS={:.0} {}",
                     count,
-                    chunk.data.len(),
+                    duration_ms,
                     rms,
-                    if rms < 500.0 { "(靜音，跳過)" } else { "(有聲音，送 STT)" }
+                    if rms < 100.0 { "(低音量，跳過)" } else { "(送 STT)" }
                 )).ok();
             }
 
+            // RMS 過低的語句跳過
             if rms < 100.0 {
                 continue;
             }
@@ -170,58 +143,22 @@ async fn start_auto_mode(
             // 送到 STT 辨識
             {
                 use tauri::Emitter;
-                app_clone.emit("debug-log", &format!("正在送 STT... (RMS={:.0})", rms)).ok();
+                app_clone.emit("debug-log", &format!("正在送 STT... ({}ms, RMS={:.0})", duration_ms, rms)).ok();
             }
 
             match stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url_clone).await {
                 Ok(text) => {
                     let text = text.trim().to_string();
                     if !text.is_empty() && text.len() > 1 {
-                        // 即時發送 STT 結果到前端（讓 UI 即時顯示逐字稿）
+                        // 發送 STT 結果到前端
                         use tauri::Emitter;
                         app_clone.emit("stt-result", &text).ok();
+                        app_clone.emit("debug-log", &format!("送出到 AI: {}", &text)).ok();
 
-                        // 防抖機制：累積文字，重設 2 秒計時器
-                        let mut state = debounce_state().lock().await;
-
-                        // 將新的 STT 文字加入緩衝區（用空格分隔）
-                        if !state.buffer.is_empty() {
-                            state.buffer.push(' ');
+                        // VAD 模式：語句結束就直接送 AI，不需防抖
+                        if let Err(e) = websocket_client::send_message(&text, mode).await {
+                            app_clone.emit("debug-log", &format!("WebSocket 傳送失敗: {}", e)).ok();
                         }
-                        state.buffer.push_str(&text);
-
-                        // 取消現有的計時器（重新計時）
-                        if let Some(handle) = state.pending_timer.take() {
-                            handle.abort();
-                        }
-
-                        // 啟動 4 秒延遲傳送任務（累積更完整的句子再送出）
-                        let send_mode = mode;
-                        let app_for_timer = app_clone.clone();
-                        let timer_handle = tokio::spawn(async move {
-                            // 等待 4 秒，累積更完整的語句再送出，避免碎片化
-                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-                            // 取出緩衝區內容並清空
-                            let accumulated_text = {
-                                let mut s = debounce_state().lock().await;
-                                let text = s.buffer.clone();
-                                s.buffer.clear();
-                                s.pending_timer = None;
-                                text
-                            };
-
-                            // 送出累積的完整文字到 WebSocket
-                            if !accumulated_text.is_empty() {
-                                use tauri::Emitter;
-                                app_for_timer.emit("debug-log", &format!("送出到 AI: {}", &accumulated_text)).ok();
-                                if let Err(e) = websocket_client::send_message(&accumulated_text, send_mode).await {
-                                    app_for_timer.emit("debug-log", &format!("WebSocket 傳送失敗: {}", e)).ok();
-                                }
-                            }
-                        });
-
-                        state.pending_timer = Some(timer_handle);
                     } else {
                         use tauri::Emitter;
                         app_clone.emit("debug-log", &format!("STT 回傳空白 (text={:?})", text)).ok();
@@ -239,14 +176,14 @@ async fn start_auto_mode(
         app_clone.emit("debug-log", "音訊擷取已結束").ok();
     });
 
-    Ok("自動模式已啟動".to_string())
+    Ok("自動模式已啟動（VAD）".to_string())
 }
 
-/// 停止自動模式（同時清除防抖緩衝區）
+/// 停止自動模式
 #[tauri::command]
 async fn stop_auto_mode() -> Result<String, String> {
     audio_capture::stop_capture();
-    clear_debounce().await;
+    audio_player::cancel_playback();
     Ok("自動模式已停止".to_string())
 }
 
@@ -516,6 +453,7 @@ async fn auto_setup(app: tauri::AppHandle) -> Result<serde_json::Value, String> 
 }
 
 /// 下載 TTS 音訊並播放到 VB-Cable（讓視訊軟體的麥克風收到 AI 語音）
+/// 相容舊的整段下載播放模式
 #[tauri::command]
 async fn play_audio_to_vbcable(audio_url: String) -> Result<String, String> {
     // Step 1: Download WAV
@@ -533,6 +471,33 @@ async fn play_audio_to_vbcable(audio_url: String) -> Result<String, String> {
     }).await.map_err(|e| format!("執行緒錯誤: {}", e))?;
 
     result
+}
+
+/// 將音訊 chunk 加入串流播放佇列
+#[tauri::command]
+async fn enqueue_audio_chunk(audio_url: String) -> Result<String, String> {
+    // 下載音訊
+    let client = reqwest::Client::new();
+    let resp = client.get(&audio_url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send().await
+        .map_err(|e| format!("下載音訊 chunk 失敗: {}", e))?;
+    let wav_bytes = resp.bytes().await
+        .map_err(|e| format!("讀取音訊 chunk 失敗: {}", e))?;
+
+    // 加入播放佇列
+    tokio::task::spawn_blocking(move || {
+        audio_player::enqueue_audio_chunk(&wav_bytes)
+    }).await.map_err(|e| format!("執行緒錯誤: {}", e))??;
+
+    Ok("已加入播放佇列".to_string())
+}
+
+/// 取消所有音訊播放（打斷機制）
+#[tauri::command]
+async fn cancel_audio_playback() -> Result<String, String> {
+    audio_player::cancel_playback();
+    Ok("已取消播放".to_string())
 }
 
 /// Synchronous WAV playback to VB-Cable device
@@ -571,7 +536,6 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
     let device_name = vb_device.name().unwrap_or_default();
 
     // 使用 VB-Cable 的預設輸出設定（而不是 WAV 檔案的取樣率）
-    // VB-Cable 通常只支援 44100/48000 Hz，TTS 輸出的 22050 Hz 會導致串流建立失敗
     let device_config = vb_device.default_output_config()
         .map_err(|e| format!("取得 VB-Cable 預設設定失敗: {}", e))?;
     let device_sample_rate = device_config.sample_rate().0;

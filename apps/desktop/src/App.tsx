@@ -458,16 +458,25 @@ function MainApp() {
             return [...prev, { type: 'ai-text', text, timestamp: Date.now() }];
           });
         } else if (msg.type === 'tts_audio') {
+          // 舊模式（非串流回退）：整段音訊
           const audioUrl = msg.data?.audio_url || '';
           addLog('ai-audio', '語音回覆已產生');
           if (audioUrl) {
             invoke('play_audio_to_vbcable', { audioUrl }).then(() => {
               addLog('ai-audio', '語音已送出到虛擬麥克風');
             }).catch((err) => {
-              // 不要用系統喇叭播放！否則 WASAPI loopback 會錄到產生回饋迴圈
               addLog('system', `VB-Cable 播放失敗: ${err}，請確認已安裝 VB-Cable`);
             });
           }
+        } else if (msg.type === 'tts_audio_chunk') {
+          // 串流模式：逐句音訊（Rust 層自動下載 + 入隊播放，這裡只更新 UI）
+          const idx = msg.data?.index ?? 0;
+          if (idx === 0) {
+            addLog('ai-audio', '串流語音開始...');
+          }
+        } else if (msg.type === 'tts_stream_end') {
+          const total = msg.data?.total_chunks ?? 0;
+          addLog('ai-audio', `語音串流完成 (${total} 段)`);
         } else if (msg.type === 'avatar_video') {
           const videoUrl = msg.data?.video_url || '';
           addLog('ai-video', `臉部動畫: ${videoUrl || '(空URL)'}`);
