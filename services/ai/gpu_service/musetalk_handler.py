@@ -10,6 +10,7 @@
 """
 
 import io
+import os
 import sys
 import logging
 import numpy as np
@@ -31,6 +32,10 @@ class MuseTalkHandler:
             sys.path.insert(0, str(musetalk_path))
 
         try:
+            # MuseTalk 內部用相對路徑載入 config，需切換工作目錄
+            original_cwd = os.getcwd()
+            os.chdir(str(musetalk_path))
+
             # 載入 MuseTalk 推論模組
             from musetalk.utils.preprocessing import get_landmark_and_bbox
             from musetalk.utils.blending import get_image
@@ -39,6 +44,9 @@ class MuseTalkHandler:
             self.audio_processor, self.vae, self.unet, self.pe = load_all_model()
             self.get_landmark_and_bbox = get_landmark_and_bbox
             self.get_image = get_image
+
+            # 切回原工作目錄
+            os.chdir(original_cwd)
             logger.info("MuseTalk 模型載入完成")
         except ImportError as e:
             logger.error(f"MuseTalk 未安裝: {e}")
