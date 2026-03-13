@@ -205,6 +205,24 @@ async def generate(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"生成失敗: {str(e)}")
 
 
+@app.post("/api/v1/generate/stream")
+async def generate_stream(request: GenerateRequest):
+    """Gateway 串流端點 — 逐句回傳 SSE，讓 Gateway 邊收邊處理 TTS"""
+    handler = _get_handler(request.llm_model)
+
+    messages = [{"role": "user", "content": request.text}]
+
+    return StreamingResponse(
+        handler.chat_stream(
+            model=request.llm_model,
+            system_prompt=request.system_prompt,
+            messages=messages,
+            temperature=request.temperature,
+        ),
+        media_type="text/event-stream",
+    )
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """處理對話請求（非串流）"""

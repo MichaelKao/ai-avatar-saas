@@ -5,9 +5,9 @@
 |------|-----|------|
 | Web 前端 | https://ai-avatar-saas-production-f9f9.up.railway.app | Next.js 前台，Railway 部署 |
 | API Gateway | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 部署 |
-| GPU 服務 | https://oq00jb5vt1laws-8888.proxy.runpod.net | RunPod A40，含 STT/TTS/Avatar/LLM proxy |
+| GPU 服務 | https://yam5ie51sqxres-8888.proxy.runpod.net | RunPod A40，含 STT/TTS/Avatar/LLM proxy |
 | 健康檢查 | https://ai-avatar-saas-production.up.railway.app/health | Gateway |
-| GPU 健康檢查 | https://oq00jb5vt1laws-8888.proxy.runpod.net/health | GPU + Whisper + CosyVoice + Wav2Lip |
+| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | GPU + Whisper + CosyVoice + Wav2Lip |
 | 桌面版下載 | https://github.com/MichaelKao/ai-avatar-saas/releases | Tauri 2 桌面安裝檔 |
 
 ## 搬網域時需要改的地方
@@ -17,8 +17,8 @@
 在 Railway Dashboard → 你的 Gateway Service → Variables：
 | 變數 | 目前值 | 說明 |
 |------|--------|------|
-| `AI_SERVICE_URL` | `https://oq00jb5vt1laws-8888.proxy.runpod.net` | LLM 代理（透過 RunPod combined 服務） |
-| `GPU_SERVICE_URL` | `https://oq00jb5vt1laws-8888.proxy.runpod.net` | TTS + Wav2Lip + STT |
+| `AI_SERVICE_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | LLM 代理（透過 RunPod combined 服務） |
+| `GPU_SERVICE_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | TTS + Wav2Lip + STT |
 | `CORS_ORIGINS` | `*` 或前端 URL | 如果要限制來源 |
 | `DATABASE_URL` | Railway 自動提供 | PostgreSQL |
 | `REDIS_URL` | Railway 自動提供 | Redis |
@@ -34,7 +34,7 @@
 - **行 44**：桌面版下載連結 → GitHub Release URL
 
 ### 4. RunPod GPU 服務
-- **Pod ID**：`oq00jb5vt1laws`
+- **Pod ID**：`yam5ie51sqxres`
 - **內部 port**：8889（外部 proxy 8888）
 - **LLM 服務**：內部 port 8002（透過 combined.py 代理到 8889）
 - 如果換 RunPod Pod，需更新上述所有 URL 中的 pod ID

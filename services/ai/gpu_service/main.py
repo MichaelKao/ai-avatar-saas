@@ -554,5 +554,53 @@ async def fast_synthesize_speech(request: FastTTSRequest):
         raise HTTPException(500, f"快速語音合成失敗: {str(e)}")
 
 
+# ============== 音訊合併（句子級 Pipeline 用） ==============
+
+class ConcatenateRequest(BaseModel):
+    audio_urls: list[str]  # 相對路徑列表，例如 ["/outputs/xxx.wav", "/outputs/yyy.wav"]
+
+
+@app.post("/api/v1/tts/concatenate")
+async def concatenate_audio(request: ConcatenateRequest):
+    """合併多段音訊為一個檔案（支援句子級 TTS Pipeline）"""
+    if len(request.audio_urls) == 0:
+        raise HTTPException(400, "至少需要一段音訊")
+
+    if len(request.audio_urls) == 1:
+        # 只有一段，直接回傳
+        return {"data": {"audio_url": request.audio_urls[0]}, "error": None}
+
+    try:
+        from pydub import AudioSegment
+
+        combined = AudioSegment.empty()
+        for url in request.audio_urls:
+            relative = url.lstrip("/")
+            if relative.startswith("outputs/"):
+                relative = relative[len("outputs/"):]
+            path = OUTPUT_DIR / relative
+            if not path.exists():
+                logger.warning(f"合併音訊：檔案不存在 {path}，跳過")
+                continue
+            combined += AudioSegment.from_wav(str(path))
+
+        if len(combined) == 0:
+            raise HTTPException(400, "沒有有效的音訊檔案可合併")
+
+        filename = f"concat_{uuid.uuid4()}.wav"
+        output_path = OUTPUT_DIR / filename
+        # 統一格式：16kHz mono 16-bit（與 TTS 輸出一致）
+        combined = combined.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        combined.export(str(output_path), format="wav")
+
+        logger.info(f"音訊合併完成: {len(request.audio_urls)} 段 → {filename} ({len(combined)}ms)")
+        return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+    except ImportError:
+        raise HTTPException(503, "pydub 未安裝（pip install pydub）")
+    except Exception as e:
+        logger.error(f"音訊合併失敗: {e}")
+        raise HTTPException(500, f"音訊合併失敗: {str(e)}")
+
+
 # ============== 靜態檔案（提供音訊/影片下載） ==============
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
