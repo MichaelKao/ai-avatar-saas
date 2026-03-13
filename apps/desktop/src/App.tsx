@@ -447,7 +447,16 @@ function MainApp() {
         const msg = JSON.parse(event.payload);
         if (msg.type === 'suggestion_text') {
           const text = msg.payload?.text || msg.data?.text || '';
-          addLog('ai-text', text);
+          // 串流增量更新 — 替換最後一筆 AI 文字，避免重複顯示
+          setLogs(prev => {
+            const lastIdx = prev.length - 1;
+            if (lastIdx >= 0 && prev[lastIdx].type === 'ai-text') {
+              const updated = [...prev];
+              updated[lastIdx] = { ...updated[lastIdx], text };
+              return updated;
+            }
+            return [...prev, { type: 'ai-text', text, timestamp: Date.now() }];
+          });
         } else if (msg.type === 'tts_audio') {
           const audioUrl = msg.data?.audio_url || '';
           addLog('ai-audio', '語音回覆已產生');
@@ -461,7 +470,7 @@ function MainApp() {
           }
         } else if (msg.type === 'avatar_video') {
           const videoUrl = msg.data?.video_url || '';
-          addLog('ai-video', '臉部動畫已產生');
+          addLog('ai-video', `臉部動畫: ${videoUrl || '(空URL)'}`);
           if (videoUrl) {
             setAvatarVideoUrl(videoUrl);
             // 同步發送到 Avatar 獨立視窗
@@ -507,9 +516,15 @@ function MainApp() {
   // 播放 Avatar 影片
   // -----------------------------------------------------------------------
   useEffect(() => {
-    if (avatarVideoUrl && avatarVideoRef.current) {
-      avatarVideoRef.current.src = avatarVideoUrl;
-      avatarVideoRef.current.play().catch(() => {});
+    if (avatarVideoUrl) {
+      // 延遲 100ms 確保 video element 已渲染
+      const timer = setTimeout(() => {
+        if (avatarVideoRef.current) {
+          avatarVideoRef.current.src = avatarVideoUrl;
+          avatarVideoRef.current.play().catch(() => {});
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [avatarVideoUrl]);
 

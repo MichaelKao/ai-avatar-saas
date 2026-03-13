@@ -226,6 +226,54 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			},
 		}
 
+		// 用 channel 做訊息排程，新訊息取消舊的處理
+		msgChan := make(chan TranscriptionMessage, 10)
+
+		// 背景 goroutine 處理訊息（只處理最新的，跳過積壓的舊訊息）
+		go func() {
+			for msg := range msgChan {
+				// 把 channel 裡積壓的舊訊息全部丟掉，只處理最新的
+				latest := msg
+				drained := 0
+				for {
+					select {
+					case newer := <-msgChan:
+						latest = newer
+						drained++
+					default:
+						goto process
+					}
+				}
+			process:
+				if drained > 0 {
+					log.Printf("跳過 %d 筆舊訊息，處理最新: %s", drained, latest.Text)
+				}
+
+				voiceGender := latest.VoiceGender
+				if voiceGender == "" {
+					voiceGender = "female"
+				}
+				useCustomVoice := voiceID != "" && voiceID != "default"
+
+				writeWSMessage(conn, WSMessage{
+					Type: "thinking_animation",
+					Data: fiber.Map{"status": "start"},
+				})
+
+				h.processStreamingPipeline(
+					conn, httpClient, latest, sessionID, userID,
+					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
+					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
+				)
+
+				h.db.Exec(
+					`UPDATE meeting_sessions SET total_responses = total_responses + 1
+					 WHERE id = $1`,
+					sessionID,
+				)
+			}
+		}()
+
 		// 持續接收訊息
 		for {
 			var msg TranscriptionMessage
@@ -251,35 +299,21 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				continue
 			}
 
-			// 決定聲音性別（優先用訊息帶的，否則預設 female）
-			voiceGender := msg.VoiceGender
-			if voiceGender == "" {
-				voiceGender = "female"
+			log.Printf("收到訊息: %s", msg.Text)
+
+			// 送到處理 channel（非阻塞，積壓的會被跳過）
+			select {
+			case msgChan <- msg:
+			default:
+				// channel 滿了，丟掉最舊的再放新的
+				select {
+				case <-msgChan:
+				default:
+				}
+				msgChan <- msg
 			}
-
-			// 判斷是否有自訂聲音模型
-			useCustomVoice := voiceID != "" && voiceID != "default"
-
-			// 發送思考動畫
-			writeWSMessage(conn, WSMessage{
-				Type: "thinking_animation",
-				Data: fiber.Map{"status": "start"},
-			})
-
-			// ========== 串流 LLM + 句子級並行 TTS Pipeline ==========
-			h.processStreamingPipeline(
-				conn, httpClient, msg, sessionID, userID,
-				personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
-				voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
-			)
-
-			// 更新回應計數
-			h.db.Exec(
-				`UPDATE meeting_sessions SET total_responses = total_responses + 1
-				 WHERE id = $1`,
-				sessionID,
-			)
 		}
+		close(msgChan)
 	})
 }
 

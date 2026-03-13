@@ -195,12 +195,12 @@ async fn start_auto_mode(
                             handle.abort();
                         }
 
-                        // 啟動新的 2 秒延遲傳送任務（縮短等待時間，加快回應速度）
+                        // 啟動 4 秒延遲傳送任務（累積更完整的句子再送出）
                         let send_mode = mode;
                         let app_for_timer = app_clone.clone();
                         let timer_handle = tokio::spawn(async move {
-                            // 等待 2 秒，若期間沒有新的 STT 結果就送出
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            // 等待 4 秒，累積更完整的語句再送出，避免碎片化
+                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
                             // 取出緩衝區內容並清空
                             let accumulated_text = {
