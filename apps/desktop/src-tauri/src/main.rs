@@ -163,7 +163,7 @@ async fn start_auto_mode(
                 )).ok();
             }
 
-            if rms < 500.0 {
+            if rms < 100.0 {
                 continue;
             }
 
