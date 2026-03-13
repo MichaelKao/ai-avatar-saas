@@ -41,7 +41,7 @@ class MuseTalkHandler:
             from musetalk.utils.blending import get_image
             from musetalk.utils.utils import load_all_model
 
-            self.audio_processor, self.vae, self.unet, self.pe = load_all_model()
+            self.vae, self.unet, self.pe = load_all_model()
             self.get_landmark_and_bbox = get_landmark_and_bbox
             self.get_image = get_image
 
