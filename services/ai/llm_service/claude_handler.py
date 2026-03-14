@@ -9,10 +9,10 @@ import anthropic
 
 # 句子級分隔符（優先級高 → 遇到就切）
 SENTENCE_SEPARATORS = ["。", "？", "！", ".", "?", "!"]
-# 逗號級分隔符（最小 chunk 5 字元才切）
-CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";"]
-# 最小 chunk 長度（避免碎片）
-MIN_CHUNK_LEN = 5
+# 逗號級分隔符（最小 chunk 2 字元才切 — 越早切越快開始 TTS）
+CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";", "：", ":"]
+# 最小 chunk 長度（2 字元即切，讓首句盡快送出 TTS）
+MIN_CHUNK_LEN = 2
 
 
 class ClaudeHandler:
@@ -91,34 +91,32 @@ class ClaudeHandler:
 
 
 def _find_cut_position(buffer: str) -> int | None:
-    """找到最佳切段位置
+    """找到最佳切段位置 — 越早切越好，讓 TTS 盡快開始
     1. 句子分隔符（。？！.?!）→ 任何長度都切
-    2. 逗號分隔符（，、；,;）→ 至少 MIN_CHUNK_LEN 字元才切
+    2. 逗號級分隔符（，、；,;：:）→ 至少 MIN_CHUNK_LEN 字元才切
     """
-    # 先找句子分隔符（最早出現的）
-    earliest_sentence = None
+    # 合併所有分隔符一起找最早的切點
+    earliest = None
     for sep in SENTENCE_SEPARATORS:
         pos = buffer.find(sep)
         if pos >= 0:
             cut = pos + len(sep)
-            if earliest_sentence is None or cut < earliest_sentence:
-                earliest_sentence = cut
+            if earliest is None or cut < earliest:
+                earliest = cut
 
-    if earliest_sentence is not None:
-        return earliest_sentence
+    # 句子分隔符找到就直接切（不管長度）
+    if earliest is not None:
+        return earliest
 
-    # 再找逗號分隔符（需要最小長度）
+    # 逗號級分隔符（需要最小長度 MIN_CHUNK_LEN）
     if len(buffer) >= MIN_CHUNK_LEN:
-        earliest_clause = None
         for sep in CLAUSE_SEPARATORS:
             pos = buffer.find(sep)
             if pos >= 0:
                 cut = pos + len(sep)
                 if cut >= MIN_CHUNK_LEN:
-                    if earliest_clause is None or cut < earliest_clause:
-                        earliest_clause = cut
-
-        if earliest_clause is not None:
-            return earliest_clause
+                    if earliest is None or cut < earliest:
+                        earliest = cut
+        return earliest
 
     return None
