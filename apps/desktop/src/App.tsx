@@ -267,8 +267,10 @@ function OverlayWindow() {
 // LoginPage
 // ---------------------------------------------------------------------------
 function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: string) => void }) {
+  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -279,14 +281,23 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
       setError('請輸入電子郵件和密碼');
       return;
     }
+    if (isRegister && password.length < 8) {
+      setError('密碼至少 8 個字元');
+      return;
+    }
     setLoading(true);
     try {
-      const body: any = await invoke('api_login', { apiUrl, email, password });
+      let body: any;
+      if (isRegister) {
+        body = await invoke('api_register', { apiUrl, email, password, name: name || email.split('@')[0] });
+      } else {
+        body = await invoke('api_login', { apiUrl, email, password });
+      }
       const token = body.data?.token;
       if (!token) throw new Error('伺服器回傳格式異常，未取得 token');
       onLogin(token);
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : (err.message || '登入失敗'));
+      setError(typeof err === 'string' ? err : (err.message || (isRegister ? '註冊失敗' : '登入失敗')));
     } finally {
       setLoading(false);
     }
@@ -317,10 +328,27 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
             <IconUser />
           </div>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#f1f5f9' }}>AI 數位分身</h1>
-          <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748b' }}>登入您的帳號以繼續</p>
+          <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748b' }}>
+            {isRegister ? '建立新帳號' : '登入您的帳號以繼續'}
+          </p>
         </div>
 
         <form onSubmit={handleSubmit}>
+          {isRegister && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 6 }}>
+                名稱（選填）
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="您的名稱"
+                style={inputStyle(true)}
+              />
+            </div>
+          )}
+
           <div style={{ marginBottom: 16 }}>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 6 }}>
               電子郵件
@@ -337,7 +365,7 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
 
           <div style={{ marginBottom: 24 }}>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 6 }}>
-              密碼
+              密碼{isRegister ? '（至少 8 字元）' : ''}
             </label>
             <input
               type="password"
@@ -375,9 +403,21 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
               transition: 'all 0.2s',
             }}
           >
-            {loading ? '登入中...' : '登入'}
+            {loading ? (isRegister ? '註冊中...' : '登入中...') : (isRegister ? '註冊' : '登入')}
           </button>
         </form>
+
+        <div style={{ textAlign: 'center', marginTop: 20 }}>
+          <button
+            onClick={() => { setIsRegister(!isRegister); setError(''); }}
+            style={{
+              background: 'none', border: 'none', color: '#60a5fa',
+              fontSize: 13, cursor: 'pointer', textDecoration: 'underline',
+            }}
+          >
+            {isRegister ? '已有帳號？登入' : '沒有帳號？立即註冊'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -389,11 +429,15 @@ function LoginPage({ apiUrl, onLogin }: { apiUrl: string; onLogin: (token: strin
 function SetupPage({ onDone }: { onDone: () => void }) {
   const [progressMsg, setProgressMsg] = useState('正在檢測環境...');
   const [error, setError] = useState('');
+  const [showSkip, setShowSkip] = useState(false);
 
   useEffect(() => {
     const unlisten = listen<string>('install-progress', (event) => {
       setProgressMsg(event.payload);
     });
+
+    // 3 秒後顯示跳過按鈕，避免卡住
+    const skipTimer = setTimeout(() => setShowSkip(true), 3000);
 
     const run = async () => {
       try {
@@ -402,15 +446,20 @@ function SetupPage({ onDone }: { onDone: () => void }) {
           setProgressMsg('環境就緒！');
           setTimeout(() => onDone(), 500);
         } else {
-          setError(result.message || 'VB-Cable 安裝失敗，請手動安裝後重啟 App');
+          setError(result.message || 'VB-Cable 未安裝（模式 1 提詞模式仍可使用）');
+          setShowSkip(true);
         }
       } catch (e: any) {
         setError(typeof e === 'string' ? e : (e.message || '環境設定失敗'));
+        setShowSkip(true);
       }
     };
     run();
 
-    return () => { unlisten.then(fn => fn()); };
+    return () => {
+      unlisten.then(fn => fn());
+      clearTimeout(skipTimer);
+    };
   }, [onDone]);
 
   return (
@@ -440,25 +489,29 @@ function SetupPage({ onDone }: { onDone: () => void }) {
           <>
             <div style={{
               width: 60, height: 60, borderRadius: 30, margin: '0 auto 20px',
-              background: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: '#f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}>
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round">
-                <path d="M18 6L6 18M6 6l12 12" />
+                <path d="M12 9v4M12 17h.01" />
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
               </svg>
             </div>
-            <h2 style={{ margin: '0 0 12px', fontSize: 20, fontWeight: 700 }}>設定未完成</h2>
-            <p style={{ margin: '0 0 20px', color: '#f87171', fontSize: 14 }}>{error}</p>
-            <button
-              onClick={onDone}
-              style={{
-                padding: '10px 32px', borderRadius: 8,
-                border: 'none', background: '#475569',
-                color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-              }}
-            >
-              跳過，繼續使用
-            </button>
+            <h2 style={{ margin: '0 0 12px', fontSize: 20, fontWeight: 700 }}>環境提示</h2>
+            <p style={{ margin: '0 0 8px', color: '#fbbf24', fontSize: 14 }}>{error}</p>
+            <p style={{ margin: '0 0 20px', color: '#94a3b8', fontSize: 12 }}>模式 2/3 需要 VB-Cable 虛擬音訊，模式 1 提詞模式可直接使用</p>
           </>
+        )}
+        {showSkip && (
+          <button
+            onClick={onDone}
+            style={{
+              marginTop: 16, padding: '10px 32px', borderRadius: 8,
+              border: 'none', background: error ? gradientBg : '#475569',
+              color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            {error ? '繼續使用' : '跳過設定'}
+          </button>
         )}
       </div>
     </div>
@@ -486,10 +539,17 @@ function MainApp() {
   const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem('setupDone') === 'true');
 
-  // Settings
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
+  // Settings — 自動修正舊的 RunPod apiUrl（RunPod 不轉發 Gateway 路由）
+  const [apiUrl, setApiUrl] = useState(() => {
+    const stored = localStorage.getItem('apiUrl') || '';
+    if (stored.includes('proxy.runpod.net')) {
+      localStorage.setItem('apiUrl', 'https://ai-avatar-saas-production.up.railway.app');
+      return 'https://ai-avatar-saas-production.up.railway.app';
+    }
+    return stored || 'https://ai-avatar-saas-production.up.railway.app';
+  });
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
-  const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
+  const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '2'));
   const [voiceGender, setVoiceGender] = useState<'male' | 'female'>(() => (localStorage.getItem('voiceGender') as any) || 'female');
   const [sttMode, setSttMode] = useState<SttMode>(() => (localStorage.getItem('sttMode') as SttMode) || 'remote');
   const [showSettings, setShowSettings] = useState(false);

@@ -23,6 +23,7 @@ fn main() {
             check_virtual_devices,
             list_audio_devices,
             api_login,
+            api_register,
             api_start_session,
             api_end_session,
             install_vb_cable,
@@ -323,6 +324,30 @@ async fn api_login(api_url: String, email: String, password: String) -> Result<s
 
     if status >= 400 {
         let error_msg = body["error"].as_str().unwrap_or("登入失敗，請確認帳號密碼");
+        return Err(error_msg.to_string());
+    }
+
+    Ok(body)
+}
+
+/// 註冊新帳號
+#[tauri::command]
+async fn api_register(api_url: String, email: String, password: String, name: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/auth/register", api_url))
+        .json(&serde_json::json!({ "email": email, "password": password, "name": name }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("連線失敗: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("回應解析失敗: {}", e))?;
+
+    if status >= 400 {
+        let error_msg = body["error"].as_str().unwrap_or("註冊失敗");
         return Err(error_msg.to_string());
     }
 
