@@ -120,10 +120,12 @@ func (h *SessionHandler) StartSession(c *fiber.Ctx) error {
 	)
 
 	if activeCount > 0 {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"data":  nil,
-			"error": "已有進行中的會議，請先結束目前的會議",
-		})
+		// 自動結束舊 Session（桌面 App 可能未正常關閉）
+		h.db.Exec(
+			`UPDATE meeting_sessions SET ended_at = NOW()
+			 WHERE user_id = $1 AND ended_at IS NULL`,
+			userID,
+		)
 	}
 
 	// 取得用戶預設的 LLM 模型
