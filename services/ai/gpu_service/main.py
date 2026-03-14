@@ -32,13 +32,9 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))
 for d in [MODEL_DIR, UPLOAD_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# Whisper STT 設定
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
-
-# 全域模型變數
+# 全域模型變數（Whisper 由 stt_service.py 載入，不在此重複載入）
 cosyvoice_model = None
 wav2lip_model = None
-whisper_model = None
 musetalk_model = None
 melotts_model = None
 melotts_speaker_ids = None
@@ -47,7 +43,7 @@ melotts_speaker_ids = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """啟動時載入模型"""
-    global cosyvoice_model, wav2lip_model, whisper_model, musetalk_model
+    global cosyvoice_model, wav2lip_model, musetalk_model
 
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
@@ -89,20 +85,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"MeloTTS 載入失敗: {e}")
 
-    # 載入 Whisper STT 模型（faster-whisper）
-    try:
-        from faster_whisper import WhisperModel
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        whisper_model = WhisperModel(
-            WHISPER_MODEL_SIZE,
-            device=device,
-            compute_type=compute_type,
-            download_root=str(MODEL_DIR / "whisper"),
-        )
-        logger.info(f"Whisper ({WHISPER_MODEL_SIZE}) 模型載入完成 (device={device}, compute={compute_type})")
-    except Exception as e:
-        logger.warning(f"Whisper 載入失敗（可能尚未安裝 faster-whisper）: {e}")
+    # Whisper STT 由 stt_service.py 載入，不在此重複載入（省 ~3GB VRAM）
 
     yield
     logger.info("GPU Service 關閉")
@@ -131,8 +114,7 @@ async def health():
         "wav2lip_loaded": wav2lip_model is not None,
         "musetalk_loaded": musetalk_model is not None,
         "melotts_loaded": melotts_model is not None,
-        "whisper_loaded": whisper_model is not None,
-        "whisper_model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
+        "whisper_loaded": True,  # Whisper 由 stt_service.py 管理
     }
 
 
