@@ -54,6 +54,8 @@ fn main() {
             // 場景 API
             api_fetch_scenes,
             api_set_default_scene,
+            // 健康檢查
+            api_check_health,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -1067,6 +1069,35 @@ async fn api_fetch_scenes(api_url: String, token: String) -> Result<serde_json::
     }
 
     Ok(body)
+}
+
+/// 檢查 Gateway 和 GPU 服務健康狀態
+#[tauri::command]
+async fn api_check_health(api_url: String, gpu_url: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client 建立失敗: {}", e))?;
+
+    // 同時檢查 Gateway 和 GPU
+    let (gw_result, gpu_result) = tokio::join!(
+        client.get(format!("{}/health", api_url)).send(),
+        client.get(format!("{}/health", gpu_url)).send()
+    );
+
+    let gateway_ok = match gw_result {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    };
+    let gpu_ok = match gpu_result {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    };
+
+    Ok(serde_json::json!({
+        "gateway": gateway_ok,
+        "gpu": gpu_ok,
+    }))
 }
 
 /// 設定預設場景

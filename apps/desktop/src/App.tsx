@@ -590,6 +590,12 @@ function MainApp() {
   // 手動文字輸入（除錯用）
   const [manualText, setManualText] = useState('');
 
+  // 連線狀態指示燈
+  const [healthStatus, setHealthStatus] = useState<{ gateway: boolean | null; gpu: boolean | null }>({ gateway: null, gpu: null });
+
+  // 啟動失敗錯誤訊息
+  const [startError, setStartError] = useState('');
+
   const screen: AppScreen = !token ? 'login' : !setupDone ? 'setup' : 'main';
 
   // -----------------------------------------------------------------------
@@ -612,6 +618,24 @@ function MainApp() {
   useEffect(() => {
     localStorage.setItem('setupDone', setupDone ? 'true' : 'false');
   }, [setupDone]);
+
+  // -----------------------------------------------------------------------
+  // 連線健康檢查（進入主畫面後定期檢查）
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    if (screen !== 'main') return;
+    const checkHealth = async () => {
+      try {
+        const result: any = await invoke('api_check_health', { apiUrl, gpuUrl });
+        setHealthStatus({ gateway: result.gateway, gpu: result.gpu });
+      } catch {
+        setHealthStatus({ gateway: false, gpu: false });
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000);
+    return () => clearInterval(interval);
+  }, [screen, apiUrl, gpuUrl]);
 
   // -----------------------------------------------------------------------
   // Auto-scroll logs
@@ -855,113 +879,130 @@ function MainApp() {
 
   const handleStart = async () => {
     setShowSetupGuide(false);
-    localStorage.setItem('setupGuideShown', 'true');
     setStatus('connecting');
+    setStartError('');
     setLogs([]);
     setElapsed(0);
     setAvatarVideoUrl('');
-    addLog('system', '正在建立連線...');
+
+    // 輔助函數：記錄步驟並處理錯誤
+    const step = (msg: string) => addLog('system', msg);
+    const fail = (stepName: string, err: any) => {
+      const msg = typeof err === 'string' ? err : (err?.message || String(err));
+      return `[${stepName}] ${msg}`;
+    };
 
     try {
-      // Step 1: 先擷取 webcam 截圖（必須在停用攝影機之前）
-      let faceBase64 = '';
-      if (mode >= 2) {
-        addLog('system', '正在擷取臉部截圖...');
-        faceBase64 = await captureWebcamFrame();
-        if (faceBase64) {
-          addLog('system', '臉部截圖完成');
-        } else {
-          addLog('system', '未偵測到攝影機，將使用預設臉部');
+      // ===== Step 1: 檢查伺服器連線 =====
+      step('Step 1/6: 檢查伺服器連線...');
+      try {
+        const health: any = await invoke('api_check_health', { apiUrl, gpuUrl });
+        setHealthStatus({ gateway: health.gateway, gpu: health.gpu });
+        if (!health.gateway) {
+          throw new Error(`Gateway 無法連線 (${apiUrl})`);
         }
-        await invoke('set_voice_and_face', {
-          voiceGender,
-          faceImageBase64: faceBase64,
-        });
+        step('Gateway 連線正常');
+        if (!health.gpu) {
+          step('GPU 服務無法連線（語音辨識可能受影響）');
+        } else {
+          step('GPU 服務連線正常');
+        }
+      } catch (err: any) {
+        throw new Error(fail('伺服器檢查', err));
       }
 
-      // Step 2: Mode 3 — 開啟 Avatar 視窗 + OBS（非致命，失敗降級為語音模式）
+      // ===== Step 2: 建立 Session =====
+      step('Step 2/6: 建立 AI 會議 Session...');
+      let sid = '';
+      try {
+        const data: any = await invoke('api_start_session', { apiUrl, token });
+        sid = data.data?.sessionId || data.data?.id;
+        if (!sid) throw new Error('伺服器未回傳 Session ID');
+        setSessionId(sid);
+        step(`Session 已建立: ${sid.slice(0, 8)}...`);
+      } catch (err: any) {
+        if (err === 'TOKEN_EXPIRED' || String(err).includes('TOKEN_EXPIRED')) {
+          setStartError('登入已過期，請重新登入');
+          handleLogout();
+          return;
+        }
+        throw new Error(fail('建立 Session', err));
+      }
+
+      // ===== Step 3: 連接 WebSocket =====
+      step('Step 3/6: 連接 WebSocket...');
+      try {
+        await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
+        step('WebSocket 連線成功');
+      } catch (err: any) {
+        throw new Error(fail('WebSocket 連線', err));
+      }
+
+      // ===== Step 4: 設定音訊/視訊裝置（非致命） =====
+      step('Step 4/6: 設定裝置...');
+      let faceBase64 = '';
+      if (mode >= 2) {
+        faceBase64 = await captureWebcamFrame();
+        step(faceBase64 ? '臉部截圖完成' : '未偵測到攝影機（不影響使用）');
+        try {
+          await invoke('set_voice_and_face', { voiceGender, faceImageBase64: faceBase64 });
+        } catch {}
+      }
+      if (mode >= 2) {
+        try {
+          await invoke('auto_set_default_mic');
+          step('已切換麥克風到 VB-Cable');
+        } catch {
+          step('VB-Cable 未安裝（AI 語音將從喇叭播放）');
+        }
+      }
       if (mode === 3) {
         try {
-          addLog('system', '正在準備虛擬鏡頭環境...');
           await invoke('ensure_obs_ready');
           await invoke('open_avatar_window');
           await new Promise(r => setTimeout(r, 1500));
-          if (faceBase64) {
-            invoke('emit_avatar_face', { faceBase64 }).catch(() => {});
-          }
+          if (faceBase64) invoke('emit_avatar_face', { faceBase64 }).catch(() => {});
           const obsResult: string = await invoke('start_obs_virtual_cam', { password: null });
           setObsStatus('running');
-          addLog('system', obsResult);
+          step(obsResult);
         } catch (obsErr: any) {
-          addLog('system', `虛擬鏡頭設定失敗（${obsErr}），將以語音模式繼續`);
+          step(`虛擬鏡頭失敗（${obsErr}），繼續語音模式`);
           invoke('close_avatar_window').catch(() => {});
           invoke('cleanup_obs').catch(() => {});
         }
       }
 
-      // Step 3: 自動切換麥克風為 VB-Cable
-      if (mode >= 2) {
-        try {
-          const micResult: string = await invoke('auto_set_default_mic');
-          addLog('system', micResult);
-        } catch (err: any) {
-          addLog('system', `麥克風切換失敗: ${err}`);
-        }
-      }
-
-      // Step 4: 停用真實攝影機（Avatar 視窗已取得 webcam stream，不受影響）
-      try {
-        const camResult: string = await invoke('auto_disable_real_cameras');
-        addLog('system', camResult);
-      } catch (err: any) {
-        addLog('system', `攝影機設定: ${err}`);
-      }
-
-      addLog('system', '建立 AI 會議 Session...');
-      let data: any;
-      try {
-        data = await invoke('api_start_session', { apiUrl, token });
-      } catch (err: any) {
-        if (err === 'TOKEN_EXPIRED') {
-          addLog('system', 'Token 已過期，請重新登入');
-          handleLogout();
-          return;
-        }
-        throw new Error(typeof err === 'string' ? err : (err.message || '建立 Session 失敗'));
-      }
-
-      const sid = data.data?.sessionId || data.data?.id;
-      if (!sid) throw new Error('無法取得 Session ID');
-      setSessionId(sid);
-      addLog('system', `Session 已建立: ${sid.slice(0, 8)}...`);
-
-      addLog('system', '連接 WebSocket...');
-      await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
-      addLog('system', 'WebSocket 已連線');
-
-      // Mode 1: 開啟懸浮提示視窗
+      // ===== Step 5: Mode 1 懸浮視窗 =====
       if (mode === 1) {
+        step('Step 5/6: 開啟提示視窗...');
         try {
           await invoke('open_overlay_window');
-          addLog('system', '懸浮提示視窗已開啟');
+          step('懸浮提示視窗已開啟');
         } catch (err: any) {
-          addLog('system', `提示視窗: ${err}`);
+          step(`提示視窗: ${err}`);
         }
+      } else {
+        step('Step 5/6: 跳過（非提詞模式）');
       }
 
-      addLog('system', '啟動音訊擷取 + 語音辨識...');
+      // ===== Step 6: 啟動音訊擷取 =====
+      step('Step 6/6: 啟動音訊擷取 + 語音辨識...');
       try {
         await invoke('start_auto_mode', { app: null, gpuUrl, mode, sttMode });
-        addLog('system', `自動模式已啟動 — AI 分身就緒！(${sttMode === 'local' ? '本機 STT' : '雲端 STT'})`);
+        step(`音訊擷取已啟動 (${sttMode === 'local' ? '本機 STT' : '雲端 STT'})`);
       } catch (audioErr: any) {
-        addLog('system', `音訊擷取失敗（${audioErr}）— 可用下方文字輸入測試`);
+        step(`音訊擷取失敗: ${audioErr}`);
+        step('可使用下方文字輸入框手動測試 AI');
       }
 
       setStatus('active');
-      addLog('system', 'AI 分身已連線！請開始通話或使用下方文字輸入框測試。');
+      step('AI 分身已就緒！開始通話或用下方輸入框測試。');
+
     } catch (e: any) {
-      addLog('system', `啟動失敗: ${e.message || e}`);
-      // 清理：關閉所有可能已開啟的視窗 + 還原設定
+      const errorMsg = e.message || String(e);
+      setStartError(errorMsg);
+      addLog('system', `啟動失敗: ${errorMsg}`);
+      // 清理
       invoke('close_avatar_window').catch(() => {});
       invoke('close_overlay_window').catch(() => {});
       invoke('cleanup_obs').catch(() => {});
@@ -1067,6 +1108,27 @@ function MainApp() {
               虛擬鏡頭
             </span>
           )}
+          {/* 連線狀態指示燈 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
+            <div title={`Gateway: ${healthStatus.gateway === null ? '檢查中' : healthStatus.gateway ? '正常' : '離線'}`}
+              style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: dark ? '#94a3b8' : '#64748b' }}>
+              <div style={{
+                width: 8, height: 8, borderRadius: 4,
+                background: healthStatus.gateway === null ? '#94a3b8' : healthStatus.gateway ? '#22c55e' : '#ef4444',
+                boxShadow: healthStatus.gateway ? '0 0 4px #22c55e' : healthStatus.gateway === false ? '0 0 4px #ef4444' : 'none',
+              }} />
+              GW
+            </div>
+            <div title={`GPU: ${healthStatus.gpu === null ? '檢查中' : healthStatus.gpu ? '正常' : '離線'}`}
+              style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: dark ? '#94a3b8' : '#64748b' }}>
+              <div style={{
+                width: 8, height: 8, borderRadius: 4,
+                background: healthStatus.gpu === null ? '#94a3b8' : healthStatus.gpu ? '#22c55e' : '#ef4444',
+                boxShadow: healthStatus.gpu ? '0 0 4px #22c55e' : healthStatus.gpu === false ? '0 0 4px #ef4444' : 'none',
+              }} />
+              GPU
+            </div>
+          </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {status === 'active' && (
@@ -1342,6 +1404,36 @@ function MainApp() {
       {/* Main content area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
+        {/* 啟動失敗錯誤訊息 */}
+        {startError && status === 'idle' && (
+          <div style={{
+            margin: '12px 16px 0',
+            padding: '12px 16px',
+            borderRadius: 10,
+            background: 'rgba(239,68,68,0.12)',
+            border: '1px solid rgba(239,68,68,0.3)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 10,
+          }}>
+            <div style={{ color: '#ef4444', fontSize: 18, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>!</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#fca5a5', marginBottom: 4 }}>啟動失敗</div>
+              <div style={{ fontSize: 12, color: '#fca5a5', lineHeight: 1.5, wordBreak: 'break-all' }}>{startError}</div>
+              {logs.length > 0 && (
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 8, maxHeight: 120, overflowY: 'auto', lineHeight: 1.6 }}>
+                  {logs.map((log, i) => (
+                    <div key={i}>{log.text}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setStartError('')} style={{
+              background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 16, padding: 0, lineHeight: 1,
+            }}>x</button>
+          </div>
+        )}
+
         {/* Idle screen */}
         {status === 'idle' && !showSettings && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1387,20 +1479,38 @@ function MainApp() {
           </div>
         )}
 
-        {/* Connecting spinner */}
+        {/* Connecting: 顯示即時步驟 log */}
         {status === 'connecting' && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ textAlign: 'center' }}>
+            <div style={{ textAlign: 'center', maxWidth: 420, padding: '0 20px' }}>
               <div style={{
-                width: 60,
-                height: 60,
-                border: '3px solid #3b82f6',
-                borderTopColor: 'transparent',
-                borderRadius: 30,
-                margin: '0 auto 16px',
+                width: 50, height: 50,
+                border: '3px solid #3b82f6', borderTopColor: 'transparent',
+                borderRadius: 25, margin: '0 auto 16px',
                 animation: 'spin 1s linear infinite',
               }} />
-              <p style={{ color: '#64748b', fontSize: 16 }}>啟動 AI 分身中...</p>
+              <p style={{ color: '#f1f5f9', fontSize: 16, fontWeight: 600, marginBottom: 16 }}>啟動 AI 分身中...</p>
+              <div style={{
+                textAlign: 'left',
+                fontSize: 12,
+                color: '#94a3b8',
+                lineHeight: 1.8,
+                maxHeight: 200,
+                overflowY: 'auto',
+                background: 'rgba(15,23,42,0.5)',
+                borderRadius: 8,
+                padding: '10px 14px',
+              }}>
+                {logs.map((log, i) => (
+                  <div key={i} style={{
+                    color: log.text.includes('失敗') || log.text.includes('錯誤') ? '#fca5a5'
+                      : log.text.includes('成功') || log.text.includes('完成') || log.text.includes('正常') ? '#86efac'
+                      : '#94a3b8',
+                  }}>
+                    {log.text}
+                  </div>
+                ))}
+              </div>
               <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
             </div>
           </div>
