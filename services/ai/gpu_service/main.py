@@ -40,6 +40,8 @@ cosyvoice_model = None
 wav2lip_model = None
 whisper_model = None
 musetalk_model = None
+melotts_model = None
+melotts_speaker_ids = None
 
 
 @asynccontextmanager
@@ -73,6 +75,19 @@ async def lifespan(app: FastAPI):
         logger.info("MuseTalk 模型載入完成")
     except Exception as e:
         logger.warning(f"MuseTalk 載入失敗（可能尚未安裝）: {e}")
+
+    # 載入 MeloTTS（超低延遲 TTS，~120ms）
+    try:
+        global melotts_model, melotts_speaker_ids
+        from melo.api import TTS as MeloTTSModel
+        melotts_model = MeloTTSModel(language="ZH", device="cuda" if torch.cuda.is_available() else "cpu")
+        melotts_speaker_ids = melotts_model.hps.data.spk2id
+        # 暖機（首次推論較慢）
+        melotts_model.tts_to_file("暖機", melotts_speaker_ids["ZH"], str(OUTPUT_DIR / "_warmup.wav"))
+        melotts_model.tts_to_file("暖機", melotts_speaker_ids["ZH"], str(OUTPUT_DIR / "_warmup.wav"))
+        logger.info(f"MeloTTS 模型載入完成，speakers: {list(melotts_speaker_ids.keys())}")
+    except Exception as e:
+        logger.warning(f"MeloTTS 載入失敗: {e}")
 
     # 載入 Whisper STT 模型（faster-whisper）
     try:
@@ -115,6 +130,7 @@ async def health():
         "cosyvoice_loaded": cosyvoice_model is not None,
         "wav2lip_loaded": wav2lip_model is not None,
         "musetalk_loaded": musetalk_model is not None,
+        "melotts_loaded": melotts_model is not None,
         "whisper_loaded": whisper_model is not None,
         "whisper_model_size": WHISPER_MODEL_SIZE if whisper_model is not None else None,
     }
@@ -237,6 +253,27 @@ async def stream_synthesize_speech(request: StreamTTSRequest):
         media_type="application/octet-stream",
         headers={"X-Audio-Format": "pcm-22050-16bit-mono"},
     )
+
+
+# ============== MeloTTS 快速語音合成（~120ms，即時對話用） ==============
+
+@app.post("/api/v1/tts/melo-synthesize")
+async def melo_synthesize_speech(request: StreamTTSRequest):
+    """MeloTTS 超低延遲語音合成 — ~120ms，適合即時對話
+    回傳 JSON { data: { audio_url } }，與其他 TTS 端點格式一致
+    """
+    if melotts_model is None:
+        raise HTTPException(503, "MeloTTS 未載入")
+
+    try:
+        filename = f"melo_{uuid.uuid4().hex[:8]}.wav"
+        output_path = str(OUTPUT_DIR / filename)
+        speaker_id = melotts_speaker_ids.get("ZH", list(melotts_speaker_ids.values())[0])
+        melotts_model.tts_to_file(request.text, speaker_id, output_path, speed=1.0)
+        return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+    except Exception as e:
+        logger.error(f"MeloTTS 合成失敗: {e}")
+        raise HTTPException(500, f"MeloTTS 合成失敗: {str(e)}")
 
 
 # ============== 語音識別 STT ==============
