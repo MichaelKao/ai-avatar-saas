@@ -5,9 +5,9 @@
 |------|-----|------|
 | Web 前端 | https://ai-avatar-saas-production-f9f9.up.railway.app | Next.js 前台，Railway 部署 |
 | API Gateway | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 部署 |
-| GPU 服務 | https://yam5ie51sqxres-8888.proxy.runpod.net | RunPod A40，含 STT/TTS/Avatar/LLM proxy |
+| GPU 服務 | https://yam5ie51sqxres-8888.proxy.runpod.net | RunPod RTX 4090 (25.4GB)，含 STT/TTS/Avatar/LLM proxy |
 | 健康檢查 | https://ai-avatar-saas-production.up.railway.app/health | Gateway |
-| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | GPU + Whisper + CosyVoice + Wav2Lip |
+| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | GPU + Whisper + CosyVoice (SFT+ZS) + Wav2Lip |
 | 桌面版下載 | https://github.com/MichaelKao/ai-avatar-saas/releases | Tauri 2 桌面安裝檔 |
 
 ## 搬網域時需要改的地方
@@ -46,7 +46,47 @@
 ## 技術棧
 Go 1.22 (Fiber) / Python 3.11 (FastAPI) / Next.js 14 / Tauri 2 (Rust)
 PostgreSQL 16 / Redis 7 / Stripe / Claude API / OpenAI API
-CosyVoice 2.0 (TTS) / Wav2Lip + MuseTalk (臉部動畫) / faster-whisper large-v3 (STT)
+CosyVoice (300M-SFT + 2.0-0.5B) TTS / Wav2Lip (臉部動畫) / faster-whisper large-v3 (STT)
+
+## RunPod GPU 環境安裝
+> 如果換新 Pod 或重建環境，依照以下步驟安裝：
+
+```bash
+# 1. GPU 服務程式碼
+mkdir -p /workspace/gpu_service /workspace/llm_service /workspace/outputs
+# 從 GitHub 拉取最新程式碼到 /workspace/gpu_service/ 和 /workspace/llm_service/
+
+# 2. CosyVoice（TTS 語音合成）
+cd /workspace
+git clone https://github.com/FunAudioLLM/CosyVoice.git
+cd CosyVoice
+git submodule update --init --recursive
+pip install -r requirements.txt
+cd third_party/Matcha-TTS && pip install -e . && cd ../..
+pip install setuptools pyarrow pyworld openai-whisper
+python -c "from modelscope import snapshot_download; snapshot_download('iic/CosyVoice-300M-SFT', local_dir='pretrained_models/CosyVoice-300M-SFT')"
+python -c "from modelscope import snapshot_download; snapshot_download('iic/CosyVoice2-0.5B', local_dir='pretrained_models/CosyVoice2-0.5B')"
+
+# 3. Wav2Lip（臉部動畫）
+# 需要 /workspace/Wav2Lip/checkpoints/wav2lip_gan.pth
+
+# 4. MuseTalk（即時唇形，尚未完全整合）
+cd /workspace
+git clone https://github.com/TMElyralab/MuseTalk.git
+pip install mmengine mmcv==2.1.0 mmdet==3.2.0 mmpose==1.3.1 accelerate einops
+cd MuseTalk
+python -c "from huggingface_hub import snapshot_download; snapshot_download('TMElyralab/MuseTalk', local_dir='models')"
+# DWPose 模型
+mkdir -p models/dwpose && cd models/dwpose
+python -c "from huggingface_hub import hf_hub_download; hf_hub_download('yzd-v/DWPose', 'dw-ll_ucoco_384.pth', local_dir='.')"
+# SD-VAE
+mkdir -p /workspace/MuseTalk/models/sd-vae && cd /workspace/MuseTalk/models/sd-vae
+python -c "from huggingface_hub import hf_hub_download; [hf_hub_download('stabilityai/sd-vae-ft-mse', f, local_dir='.') for f in ['config.json','diffusion_pytorch_model.bin','diffusion_pytorch_model.safetensors']]"
+
+# 5. 啟動服務
+cd /workspace/llm_service && nohup python3 main.py > /workspace/llm.log 2>&1 &
+cd /workspace/gpu_service && nohup python3 combined.py > /workspace/combined.log 2>&1 &
+```
 
 ## 專案結構
 - `apps/web/` — Next.js 14 前端（Vercel 部署）
@@ -69,7 +109,7 @@ CosyVoice 2.0 (TTS) / Wav2Lip + MuseTalk (臉部動畫) / faster-whisper large-v
   - `main.py` — FastAPI，TTS + Avatar + STT 端點
   - `combined.py` — 合併 GPU + STT + LLM proxy 的入口
   - `stt_service.py` — Whisper STT
-  - `cosyvoice_handler.py` — CosyVoice 2.0 語音克隆 + 串流 TTS
+  - `cosyvoice_handler.py` — CosyVoice TTS（300M-SFT 內建聲音 + 2.0-0.5B 語音克隆）
   - `wav2lip_handler.py` — Wav2Lip 臉部動畫（回退用）
   - `musetalk_handler.py` — MuseTalk 即時唇形動畫（30-50ms/frame）
 - `packages/shared-types/` — 共用 TypeScript 型別
