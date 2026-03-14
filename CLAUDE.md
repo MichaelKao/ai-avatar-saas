@@ -4,43 +4,54 @@
 | 服務 | URL | 說明 |
 |------|-----|------|
 | Web 前端 | https://ai-avatar-saas-production-f9f9.up.railway.app | Next.js 前台，Railway 部署 |
-| API Gateway | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 部署 |
+| API Gateway | https://yam5ie51sqxres-8888.proxy.runpod.net | Go Fiber，RunPod 共置（nginx 路由） |
+| API Gateway (Railway) | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 備用 |
 | GPU 服務 | https://yam5ie51sqxres-8888.proxy.runpod.net | RunPod RTX 4090 (25.4GB)，含 STT/TTS/Avatar/LLM proxy |
-| 健康檢查 | https://ai-avatar-saas-production.up.railway.app/health | Gateway |
-| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | GPU + Whisper + CosyVoice (SFT+ZS) + Wav2Lip |
+| 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | Gateway（nginx 路由到 port 3333） |
+| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/api/v1/models/status | GPU 模型狀態 |
 | 桌面版下載 | https://github.com/MichaelKao/ai-avatar-saas/releases | Tauri 2 桌面安裝檔 |
 
 ## 搬網域時需要改的地方
 > **重要**：如果更換域名或遷移服務，以下是需要修改的所有位置：
 
-### 1. Railway Gateway 環境變數
-在 Railway Dashboard → 你的 Gateway Service → Variables：
+### 1. RunPod 共置架構（Gateway + GPU 同機）
+Gateway 和 GPU 服務共置在同一台 RunPod 機器上，透過 nginx port 8888 做路由：
+- `/ws`, `/health`, `/api/v1/auth/`, `/api/v1/sessions/` 等 → Gateway (port 3333)
+- 其餘 → GPU 服務 (port 8889)
+- 啟動腳本：`/workspace/start.sh`（LLM + Gateway + GPU）
+- Gateway 啟動腳本：`/workspace/start_gateway.sh`
+- nginx 設定：`/workspace/nginx_gateway.conf`
+
+RunPod Gateway 環境變數（`/workspace/start_gateway.sh`）：
 | 變數 | 目前值 | 說明 |
 |------|--------|------|
-| `AI_SERVICE_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | LLM 代理（透過 RunPod combined 服務） |
-| `GPU_SERVICE_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | TTS + Wav2Lip + STT |
-| `CORS_ORIGINS` | `*` 或前端 URL | 如果要限制來源 |
-| `DATABASE_URL` | Railway 自動提供 | PostgreSQL |
-| `REDIS_URL` | Railway 自動提供 | Redis |
+| `AI_SERVICE_URL` | `http://localhost:8889` | LLM 代理（同機 localhost） |
+| `GPU_SERVICE_URL` | `http://localhost:8889` | TTS + Wav2Lip + STT（同機 localhost） |
+| `GPU_PUBLIC_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | 客戶端下載音訊/影片用的公開 URL |
+| `DATABASE_URL` | Railway PostgreSQL 外部連線 | 資料庫仍在 Railway |
+| `REDIS_URL` | Railway Redis 外部連線 | Redis 仍在 Railway |
+
+### 1b. Railway Gateway（備用）
+Railway 上仍保留 Gateway 部署，作為備用。
 
 ### 2. 桌面 App 預設 URL（需重新 build）
 - **檔案**：`apps/desktop/src/App.tsx`
-- **行 278**：`apiUrl` 預設值 → Gateway URL
-- **行 279**：`gpuUrl` 預設值 → RunPod GPU URL
+- `apiUrl` 預設值 → RunPod URL（Gateway 經 nginx 路由）
+- `gpuUrl` 預設值 → RunPod URL
 - 改完後需重新 `npm run tauri build` 並上傳 GitHub Release
 
 ### 3. Web 前端
 - **檔案**：`apps/web/app/page.tsx`
-- **行 44**：桌面版下載連結 → GitHub Release URL
+- 桌面版下載連結 → GitHub Release URL
 
 ### 4. RunPod GPU 服務
 - **Pod ID**：`yam5ie51sqxres`
-- **內部 port**：8889（外部 proxy 8888）
-- **LLM 服務**：內部 port 8002（透過 combined.py 代理到 8889）
-- 如果換 RunPod Pod，需更新上述所有 URL 中的 pod ID
+- **外部 proxy**：port 8888（nginx）
+- **內部 ports**：8889 (GPU+STT combined), 8002 (LLM), 3333 (Gateway)
+- 如果換 RunPod Pod，需更新所有 `yam5ie51sqxres` 相關 URL
 
 ### 5. 本地 .env 檔
-- `services/gateway/.env` — `AI_SERVICE_URL` 和 `GPU_SERVICE_URL`
+- `services/gateway/.env` — `AI_SERVICE_URL`、`GPU_SERVICE_URL`、`GPU_PUBLIC_URL`
 - `services/ai/.env` — `ANTHROPIC_API_KEY` 和 `OPENAI_API_KEY`
 
 ## 技術棧
@@ -174,11 +185,12 @@ WebSocket → 桌面 App (Rust 層自動下載 + 入隊播放)
 | REDIS_URL | Redis 連線 | redis://default:pass@host:6379 |
 | JWT_SECRET | JWT 簽名密鑰（至少 32 字元） | your-secret-key-here |
 | ANTHROPIC_API_KEY | Claude API Key | sk-ant-api03-... |
-| AI_SERVICE_URL | LLM 服務位址 | https://xxx-8888.proxy.runpod.net |
-| GPU_SERVICE_URL | GPU 服務位址（TTS/Avatar） | https://xxx-8888.proxy.runpod.net |
+| AI_SERVICE_URL | LLM 服務位址（內部呼叫） | http://localhost:8889 |
+| GPU_SERVICE_URL | GPU 服務位址（內部呼叫） | http://localhost:8889 |
+| GPU_PUBLIC_URL | GPU 服務公開 URL（客戶端下載音訊/影片用） | https://xxx-8888.proxy.runpod.net |
 | STRIPE_SECRET_KEY | Stripe 付費 | sk_live_... |
 | STRIPE_WEBHOOK_SECRET | Stripe Webhook 驗證 | whsec_... |
-| PORT | 服務埠號 | 8080 |
+| PORT | 服務埠號 | 3333 |
 | CORS_ORIGINS | 允許的前端來源 | https://your-frontend.com |
 
 ### AI 服務（services/ai/.env）

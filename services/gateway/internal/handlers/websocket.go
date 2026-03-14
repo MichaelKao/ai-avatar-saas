@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,26 @@ type AIServiceRequest struct {
 type AIServiceResponse struct {
 	Text      string `json:"text"`
 	SessionID string `json:"session_id"`
+}
+
+// gpuInternalURL 取得 GPU 服務內部 URL（API 呼叫用）
+func gpuInternalURL() string {
+	url := os.Getenv("GPU_SERVICE_URL")
+	if url == "" {
+		return "http://localhost:8889"
+	}
+	return url
+}
+
+// gpuPublicURL 取得 GPU 服務公開 URL（客戶端下載用）
+// Gateway 在 RunPod 上時，GPU_SERVICE_URL 是 localhost，客戶端無法訪問
+// GPU_PUBLIC_URL 設為 RunPod 外部 URL，讓客戶端能下載音訊/影片
+func gpuPublicURL() string {
+	url := os.Getenv("GPU_PUBLIC_URL")
+	if url != "" {
+		return url
+	}
+	return gpuInternalURL()
 }
 
 // NewWebSocketHandler 建立 WebSocketHandler 實例
@@ -370,11 +391,6 @@ type GPUResponse struct {
 
 // callGPUTTS 呼叫 GPU 服務做語音合成（Mode 2）
 func callGPUTTS(text, voiceID, voiceGender string) (string, error) {
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
-	}
-
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_id":     voiceID,
@@ -383,7 +399,7 @@ func callGPUTTS(text, voiceID, voiceGender string) (string, error) {
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Post(
-		gpuServiceURL+"/api/v1/tts/synthesize",
+		gpuInternalURL()+"/api/v1/tts/synthesize",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -402,17 +418,12 @@ func callGPUTTS(text, voiceID, voiceGender string) (string, error) {
 		return "", fmt.Errorf("解析 GPU 回應失敗: %w", err)
 	}
 
-	// 回傳完整 URL
-	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+	// 回傳公開 URL（客戶端需下載）
+	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
 // callGPUAvatar 呼叫 GPU 服務做 TTS + 臉部動畫（Mode 3）
 func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 string) (audioURL string, videoURL string, err error) {
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
-	}
-
 	payload := map[string]string{
 		"text":           text,
 		"voice_id":       voiceID,
@@ -426,7 +437,7 @@ func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 str
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Post(
-		gpuServiceURL+"/api/v1/avatar/generate-talking",
+		gpuInternalURL()+"/api/v1/avatar/generate-talking",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -445,21 +456,128 @@ func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 str
 		return "", "", fmt.Errorf("解析 GPU 回應失敗: %w", err)
 	}
 
-	audioURL = gpuServiceURL + gpuResp.Data.AudioURL
+	pubURL := gpuPublicURL()
+	audioURL = pubURL + gpuResp.Data.AudioURL
 	if gpuResp.Data.VideoURL != "" {
-		videoURL = gpuServiceURL + gpuResp.Data.VideoURL
+		videoURL = pubURL + gpuResp.Data.VideoURL
 	}
 	return audioURL, videoURL, nil
 }
 
-// callCosyVoiceTTS 呼叫 CosyVoice 語音合成（優先），回退到 Edge TTS
-func callCosyVoiceTTS(text, voiceGender string) (string, error) {
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
+// streamTTSToClient 串流 TTS pipe：GPU 邊生成 PCM → Gateway 邊收邊轉 WAV → 邊推給 client
+// 目標：首字節 < 200ms，client 收到第一段就可以開始播放
+func streamTTSToClient(ctx context.Context, conn *websocket.Conn, text, voiceGender string, index int, sessionID string) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_id":     "default",
+		"voice_gender": voiceGender,
+	})
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/stream-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("串流 TTS 失敗: %v，回退非串流", err)
+		// 回退到非串流
+		url, ttsErr := callCosyVoiceTTS(text, voiceGender)
+		if ttsErr == nil && url != "" {
+			writeWSMessage(conn, WSMessage{
+				Type: "tts_audio_chunk",
+				Data: fiber.Map{"audio_url": url, "index": index, "session_id": sessionID},
+			})
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("串流 TTS 錯誤 (%d): %s", resp.StatusCode, string(body))
+		return
 	}
 
-	// 呼叫 CosyVoice synthesize 端點（合成完存檔回 URL）
+	pubURL := gpuPublicURL()
+
+	// 邊讀 PCM 邊存，每收到足夠的 chunk 就存成 WAV 並推送
+	// CosyVoice 輸出 22050Hz 16bit mono PCM
+	buf := make([]byte, 8192) // 8KB ≈ 0.18 秒音訊
+	var allPCM []byte
+	chunkIdx := 0
+	firstChunk := true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			allPCM = append(allPCM, buf[:n]...)
+
+			// 累積到 ~0.5 秒音訊（22050 samples/s × 2 bytes × 0.5s ≈ 22050 bytes）
+			// 首次只要 4096 bytes (~0.1 秒) 就立刻送
+			threshold := 22050
+			if firstChunk {
+				threshold = 4096
+			}
+
+			if len(allPCM) >= threshold || readErr != nil {
+				// 存成 WAV 推送
+				filename := fmt.Sprintf("tts_s%d_c%d_%d.wav", index, chunkIdx, time.Now().UnixNano())
+				wavPath := "/workspace/outputs/" + filename
+				wavData := pcmToWAV(allPCM, 22050, 1, 16)
+				if writeErr := os.WriteFile(wavPath, wavData, 0644); writeErr == nil {
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{
+							"audio_url":  pubURL + "/outputs/" + filename,
+							"index":      index,
+							"chunk":      chunkIdx,
+							"session_id": sessionID,
+						},
+					})
+					if firstChunk {
+						log.Printf("TTS 句 %d 首 chunk 已送出（%d bytes）", index, len(allPCM))
+						firstChunk = false
+					}
+					chunkIdx++
+				}
+				allPCM = nil
+			}
+		}
+
+		if readErr != nil {
+			break
+		}
+	}
+
+	// 送剩餘的 PCM
+	if len(allPCM) > 0 {
+		filename := fmt.Sprintf("tts_s%d_c%d_%d.wav", index, chunkIdx, time.Now().UnixNano())
+		wavPath := "/workspace/outputs/" + filename
+		wavData := pcmToWAV(allPCM, 22050, 1, 16)
+		if writeErr := os.WriteFile(wavPath, wavData, 0644); writeErr == nil {
+			writeWSMessage(conn, WSMessage{
+				Type: "tts_audio_chunk",
+				Data: fiber.Map{
+					"audio_url":  pubURL + "/outputs/" + filename,
+					"index":      index,
+					"chunk":      chunkIdx,
+					"session_id": sessionID,
+				},
+			})
+		}
+	}
+}
+
+// callCosyVoiceTTS 呼叫 CosyVoice 串流語音合成（優先），回退到 Edge TTS
+// 使用串流端點：GPU 邊生成邊輸出 PCM → Gateway 收完存 WAV → 回傳 URL
+func callCosyVoiceTTS(text, voiceGender string) (string, error) {
+	// 優先用串流端點
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_id":     "default",
@@ -468,7 +586,84 @@ func callCosyVoiceTTS(text, voiceGender string) (string, error) {
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Post(
-		gpuServiceURL+"/api/v1/tts/synthesize",
+		gpuInternalURL()+"/api/v1/tts/stream-synthesize",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		log.Printf("CosyVoice 串流 TTS 失敗，回退非串流: %v", err)
+		return callCosyVoiceTTSSync(text, voiceGender)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("CosyVoice 串流 TTS 錯誤 (%d): %s，回退非串流", resp.StatusCode, string(body))
+		return callCosyVoiceTTSSync(text, voiceGender)
+	}
+
+	// 讀取串流 PCM 數據
+	pcmData, err := io.ReadAll(resp.Body)
+	if err != nil || len(pcmData) == 0 {
+		log.Printf("CosyVoice 串流 TTS 讀取失敗: %v", err)
+		return callCosyVoiceTTSSync(text, voiceGender)
+	}
+
+	// PCM → WAV 檔案（22050Hz 16bit mono）
+	filename := fmt.Sprintf("tts_stream_%d.wav", time.Now().UnixNano())
+	wavPath := "/workspace/outputs/" + filename
+
+	// 寫 WAV header + PCM data
+	wavData := pcmToWAV(pcmData, 22050, 1, 16)
+	if err := os.WriteFile(wavPath, wavData, 0644); err != nil {
+		log.Printf("WAV 寫入失敗: %v", err)
+		return callCosyVoiceTTSSync(text, voiceGender)
+	}
+
+	return gpuPublicURL() + "/outputs/" + filename, nil
+}
+
+// pcmToWAV 把 raw PCM bytes 轉成 WAV 格式
+func pcmToWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
+	dataLen := len(pcm)
+	headerLen := 44
+	buf := make([]byte, headerLen+dataLen)
+
+	// RIFF header
+	copy(buf[0:4], []byte("RIFF"))
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(headerLen-8+dataLen))
+	copy(buf[8:12], []byte("WAVE"))
+
+	// fmt chunk
+	copy(buf[12:16], []byte("fmt "))
+	binary.LittleEndian.PutUint32(buf[16:20], 16) // chunk size
+	binary.LittleEndian.PutUint16(buf[20:22], 1)  // PCM format
+	binary.LittleEndian.PutUint16(buf[22:24], uint16(channels))
+	binary.LittleEndian.PutUint32(buf[24:28], uint32(sampleRate))
+	blockAlign := channels * bitsPerSample / 8
+	binary.LittleEndian.PutUint32(buf[28:32], uint32(sampleRate*blockAlign)) // byte rate
+	binary.LittleEndian.PutUint16(buf[32:34], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(buf[34:36], uint16(bitsPerSample))
+
+	// data chunk
+	copy(buf[36:40], []byte("data"))
+	binary.LittleEndian.PutUint32(buf[40:44], uint32(dataLen))
+	copy(buf[44:], pcm)
+
+	return buf
+}
+
+// callCosyVoiceTTSSync 非串流 CosyVoice TTS（回退用）
+func callCosyVoiceTTSSync(text, voiceGender string) (string, error) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_id":     "default",
+		"voice_gender": voiceGender,
+	})
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(
+		gpuInternalURL()+"/api/v1/tts/synthesize",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -488,16 +683,11 @@ func callCosyVoiceTTS(text, voiceGender string) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
 		return callEdgeTTS(text, voiceGender)
 	}
-	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
 // callEdgeTTS 呼叫 Edge TTS 快速語音合成（回退用）
 func callEdgeTTS(text, voiceGender string) (string, error) {
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
-	}
-
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_gender": voiceGender,
@@ -505,7 +695,7 @@ func callEdgeTTS(text, voiceGender string) (string, error) {
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Post(
-		gpuServiceURL+"/api/v1/tts/fast-synthesize",
+		gpuInternalURL()+"/api/v1/tts/fast-synthesize",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -524,20 +714,20 @@ func callEdgeTTS(text, voiceGender string) (string, error) {
 		return "", fmt.Errorf("解析 Edge TTS 回應失敗: %w", err)
 	}
 
-	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
 // callWav2LipFromAudio 用既有音訊 + 臉部圖片產生 Wav2Lip 臉部動畫
 func callWav2LipFromAudio(audioURL, faceImageURL, faceImageBase64 string) (string, error) {
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
-	}
+	internalURL := gpuInternalURL()
+	pubURL := gpuPublicURL()
 
 	// 從完整 URL 中取出相對路徑（/outputs/xxx.wav）
 	relativeAudioURL := audioURL
-	if strings.HasPrefix(audioURL, gpuServiceURL) {
-		relativeAudioURL = audioURL[len(gpuServiceURL):]
+	if strings.HasPrefix(audioURL, pubURL) {
+		relativeAudioURL = audioURL[len(pubURL):]
+	} else if strings.HasPrefix(audioURL, internalURL) {
+		relativeAudioURL = audioURL[len(internalURL):]
 	}
 
 	payload := map[string]string{
@@ -551,7 +741,7 @@ func callWav2LipFromAudio(audioURL, faceImageURL, faceImageBase64 string) (strin
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Post(
-		gpuServiceURL+"/api/v1/avatar/animate-from-audio",
+		internalURL+"/api/v1/avatar/animate-from-audio",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -571,7 +761,7 @@ func callWav2LipFromAudio(audioURL, faceImageURL, faceImageBase64 string) (strin
 	}
 
 	if gpuResp.Data.VideoURL != "" {
-		return gpuServiceURL + gpuResp.Data.VideoURL, nil
+		return pubURL + gpuResp.Data.VideoURL, nil
 	}
 	return "", nil
 }
@@ -600,11 +790,6 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	if aiServiceURL == "" {
 		aiServiceURL = "http://localhost:8001"
 	}
-	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
-	if gpuServiceURL == "" {
-		gpuServiceURL = "http://localhost:8002"
-	}
-
 	// 嘗試串流，失敗則回退到非串流
 	reqBody, _ := json.Marshal(AIServiceRequest{
 		Text:         msg.Text,
@@ -686,48 +871,38 @@ func (h *WebSocketHandler) processStreamingPipeline(
 			},
 		})
 
-		// Mode 2/3: 每個句子立刻啟動 TTS → 完成後立刻送 tts_audio_chunk
+		// Mode 2/3: 每個句子立刻啟動串流 TTS → PCM chunks 即時推送
 		if msg.Mode >= 2 {
 			ttsWg.Add(1)
 			go func(s string, i int) {
 				defer ttsWg.Done()
 
-				// 檢查是否已取消
 				select {
 				case <-ctx.Done():
 					return
 				default:
 				}
 
-				var url string
-				var ttsErr error
+				var audioURL string
 				if useCustomVoice {
-					url, ttsErr = callGPUTTS(s, voiceID, voiceGender)
+					// 自訂聲音用非串流模式
+					u, ttsErr := callGPUTTS(s, voiceID, voiceGender)
+					if ttsErr != nil || u == "" {
+						log.Printf("TTS 第 %d 句失敗: %v", i, ttsErr)
+						return
+					}
+					audioURL = u
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
+					})
 				} else {
-					url, ttsErr = callCosyVoiceTTS(s, voiceGender)
+					// 預設聲音用串流模式：邊生成邊推 PCM chunks
+					streamTTSToClient(ctx, conn, s, voiceGender, i, sessionID)
 				}
 
-				if ttsErr != nil {
-					log.Printf("TTS 第 %d 句失敗: %v", i, ttsErr)
-					return
-				}
-
-				if url == "" {
-					return
-				}
-
-				// 立刻送出這一段音訊給 client（不等其他句子）
-				writeWSMessage(conn, WSMessage{
-					Type: "tts_audio_chunk",
-					Data: fiber.Map{
-						"audio_url":  url,
-						"index":      i,
-						"session_id": sessionID,
-					},
-				})
-
-				// Mode 3: 同時觸發 MuseTalk/Wav2Lip
-				if msg.Mode == 3 {
+				// Mode 3: 自訂聲音才觸發 Wav2Lip（串流模式暫不支援）
+				if msg.Mode == 3 && audioURL != "" {
 					go func(aURL, fURL, fBase64, sid string) {
 						vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
 						if wErr != nil {
@@ -743,7 +918,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 								},
 							})
 						}
-					}(url, faceImageURL, sessionFaceBase64, sessionID)
+					}(audioURL, faceImageURL, sessionFaceBase64, sessionID)
 				}
 			}(sentence, idx)
 		}
@@ -885,13 +1060,13 @@ func (h *WebSocketHandler) processNonStreaming(
 }
 
 // callConcatenateAudio 呼叫 GPU 服務合併多段音訊
-func callConcatenateAudio(httpClient *http.Client, gpuServiceURL string, audioURLs []string) (string, error) {
+func callConcatenateAudio(httpClient *http.Client, audioURLs []string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"audio_urls": audioURLs,
 	})
 
 	resp, err := httpClient.Post(
-		gpuServiceURL+"/api/v1/tts/concatenate",
+		gpuInternalURL()+"/api/v1/tts/concatenate",
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
@@ -910,7 +1085,7 @@ func callConcatenateAudio(httpClient *http.Client, gpuServiceURL string, audioUR
 		return "", fmt.Errorf("解析合併回應失敗: %w", err)
 	}
 
-	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
 // callAIService 呼叫 Python LLM 服務（非串流，回退用）

@@ -368,7 +368,7 @@ function MainApp() {
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem('setupDone') === 'true');
 
   // Settings
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://ai-avatar-saas-production.up.railway.app');
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
   const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
   const [voiceGender, setVoiceGender] = useState<'male' | 'female'>(() => (localStorage.getItem('voiceGender') as any) || 'female');
