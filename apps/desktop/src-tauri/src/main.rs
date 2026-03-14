@@ -4,6 +4,7 @@
 mod websocket_client;
 mod audio_capture;
 mod stt_client;
+mod local_stt;
 mod obs_virtual_cam;
 mod obs_manager;
 mod vad;
@@ -42,6 +43,16 @@ fn main() {
             restore_default_mic,
             auto_disable_real_cameras,
             restore_real_cameras,
+            // 本機 STT
+            init_local_stt,
+            get_stt_model_status,
+            // 懸浮提示視窗
+            open_overlay_window,
+            close_overlay_window,
+            update_overlay_text,
+            // 場景 API
+            api_fetch_scenes,
+            api_set_default_scene,
         ])
         .run(tauri::generate_context!())
         .expect("啟動失敗");
@@ -94,21 +105,28 @@ fn get_status() -> Result<serde_json::Value, String> {
 }
 
 /// 啟動自動模式 — VAD 偵測語音結束 → STT → 直接送 AI（無防抖）
+/// stt_mode: "local"（本機 Whisper）或 "remote"（雲端 GPU Whisper）
 #[tauri::command]
 async fn start_auto_mode(
     app: tauri::AppHandle,
     gpu_url: String,
     mode: i32,
+    stt_mode: Option<String>,
 ) -> Result<String, String> {
     let mut rx = audio_capture::start_capture()?;
 
     let app_clone = app.clone();
     let gpu_url_clone = gpu_url.clone();
+    let use_local_stt = stt_mode.as_deref() == Some("local") && local_stt::is_ready();
 
-    // 送出除錯訊息：顯示 GPU URL
+    // 送出除錯訊息
     {
         use tauri::Emitter;
-        app_clone.emit("debug-log", &format!("GPU URL: {}", gpu_url_clone)).ok();
+        if use_local_stt {
+            app_clone.emit("debug-log", "使用本機 Whisper STT（無需上傳）").ok();
+        } else {
+            app_clone.emit("debug-log", &format!("使用雲端 STT: {}", gpu_url_clone)).ok();
+        }
         app_clone.emit("debug-log", "VAD 語音偵測已啟動，等待語音...").ok();
     }
 
@@ -140,20 +158,35 @@ async fn start_auto_mode(
                 continue;
             }
 
-            // 送到 STT 辨識
+            // STT 辨識（本機或雲端）
+            let stt_start = std::time::Instant::now();
             {
                 use tauri::Emitter;
-                app_clone.emit("debug-log", &format!("正在送 STT... ({}ms, RMS={:.0})", duration_ms, rms)).ok();
+                let stt_label = if use_local_stt { "本機 STT" } else { "雲端 STT" };
+                app_clone.emit("debug-log", &format!("正在 {}... ({}ms, RMS={:.0})", stt_label, duration_ms, rms)).ok();
             }
 
-            match stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url_clone).await {
+            let stt_result = if use_local_stt {
+                // 本機 Whisper（在 blocking 執行緒中跑，避免阻塞 async runtime）
+                let data = chunk.data.clone();
+                let sr = chunk.sample_rate;
+                tokio::task::spawn_blocking(move || {
+                    local_stt::transcribe(&data, sr)
+                }).await.unwrap_or_else(|e| Err(format!("執行緒錯誤: {}", e)))
+            } else {
+                // 雲端 Whisper
+                stt_client::transcribe(&chunk.data, chunk.sample_rate, &gpu_url_clone).await
+            };
+
+            let stt_elapsed = stt_start.elapsed().as_millis();
+
+            match stt_result {
                 Ok(text) => {
                     let text = text.trim().to_string();
                     if !text.is_empty() && text.len() > 1 {
-                        // 發送 STT 結果到前端
                         use tauri::Emitter;
                         app_clone.emit("stt-result", &text).ok();
-                        app_clone.emit("debug-log", &format!("送出到 AI: {}", &text)).ok();
+                        app_clone.emit("debug-log", &format!("STT 完成 ({}ms): {}", stt_elapsed, &text)).ok();
 
                         // VAD 模式：語句結束就直接送 AI，不需防抖
                         if let Err(e) = websocket_client::send_message(&text, mode).await {
@@ -161,12 +194,12 @@ async fn start_auto_mode(
                         }
                     } else {
                         use tauri::Emitter;
-                        app_clone.emit("debug-log", &format!("STT 回傳空白 (text={:?})", text)).ok();
+                        app_clone.emit("debug-log", &format!("STT 回傳空白 ({}ms)", stt_elapsed)).ok();
                     }
                 }
                 Err(e) => {
                     use tauri::Emitter;
-                    app_clone.emit("debug-log", &format!("STT 失敗: {}", e)).ok();
+                    app_clone.emit("debug-log", &format!("STT 失敗 ({}ms): {}", stt_elapsed, e)).ok();
                 }
             }
         }
@@ -176,7 +209,8 @@ async fn start_auto_mode(
         app_clone.emit("debug-log", "音訊擷取已結束").ok();
     });
 
-    Ok("自動模式已啟動（VAD）".to_string())
+    let label = if use_local_stt { "本機 STT" } else { "雲端 STT" };
+    Ok(format!("自動模式已啟動（VAD + {}）", label))
 }
 
 /// 停止自動模式
@@ -875,4 +909,149 @@ fn calculate_rms(data: &[i16]) -> f64 {
     if data.is_empty() { return 0.0; }
     let sum: f64 = data.iter().map(|&s| (s as f64) * (s as f64)).sum();
     (sum / data.len() as f64).sqrt()
+}
+
+// =========================================================================
+// 本機 STT 指令
+// =========================================================================
+
+/// 初始化本機 Whisper STT（下載 CLI + 模型）
+#[tauri::command]
+async fn init_local_stt(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+
+    // 設定模型儲存目錄
+    let model_dir = app.path()
+        .app_data_dir()
+        .map_err(|e| format!("取得 app 目錄失敗: {}", e))?
+        .join("whisper");
+    local_stt::set_model_dir(model_dir);
+
+    // 下載 CLI + 模型（如果尚未下載）
+    if !local_stt::is_ready() {
+        local_stt::download_all(app.clone()).await?;
+    }
+
+    Ok("本機 Whisper STT 已就緒".to_string())
+}
+
+/// 取得本機 STT 狀態
+#[tauri::command]
+fn get_stt_model_status() -> Result<serde_json::Value, String> {
+    Ok(local_stt::status())
+}
+
+// =========================================================================
+// 懸浮提示視窗（Mode 1 overlay）
+// =========================================================================
+
+/// 開啟半透明懸浮提示視窗
+#[tauri::command]
+async fn open_overlay_window(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+
+    // 已開啟就聚焦
+    if let Some(window) = app.get_webview_window("overlay") {
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok("提示視窗已開啟".to_string());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "overlay",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("AI 提示")
+    .decorations(false)
+    .always_on_top(true)
+    .transparent(true)
+    .inner_size(480.0, 200.0)
+    .skip_taskbar(true)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("開啟提示視窗失敗: {}", e))?;
+
+    // 移到螢幕右下角
+    if let Some(window) = app.get_webview_window("overlay") {
+        if let Ok(monitor) = window.current_monitor() {
+            if let Some(m) = monitor {
+                let size = m.size();
+                let x = (size.width as f64 - 500.0).max(0.0) as i32;
+                let y = (size.height as f64 - 250.0).max(0.0) as i32;
+                window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition { x, y },
+                )).ok();
+            }
+        }
+    }
+
+    Ok("提示視窗已開啟".to_string())
+}
+
+/// 關閉懸浮提示視窗
+#[tauri::command]
+async fn close_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("overlay") {
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 更新懸浮提示視窗的文字
+#[tauri::command]
+async fn update_overlay_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit_to("overlay", "overlay-text-update", &text)
+        .map_err(|e| format!("發送失敗: {}", e))?;
+    Ok(())
+}
+
+// =========================================================================
+// 場景 API（透過 Rust 後端，避免 CORS 問題）
+// =========================================================================
+
+/// 取得用戶的場景列表
+#[tauri::command]
+async fn api_fetch_scenes(api_url: String, token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/v1/scenes", api_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("取得場景失敗: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("解析失敗: {}", e))?;
+
+    if status == 401 || status == 403 {
+        return Err("TOKEN_EXPIRED".to_string());
+    }
+    if status >= 400 {
+        let error_msg = body["error"].as_str().unwrap_or("取得場景失敗");
+        return Err(error_msg.to_string());
+    }
+
+    Ok(body)
+}
+
+/// 設定預設場景
+#[tauri::command]
+async fn api_set_default_scene(api_url: String, token: String, scene_id: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/scenes/{}/set-default", api_url, scene_id))
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("設定場景失敗: {}", e))?;
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("解析失敗: {}", e))?;
+
+    Ok(body)
 }

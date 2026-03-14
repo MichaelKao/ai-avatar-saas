@@ -9,11 +9,20 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 type AppScreen = 'login' | 'setup' | 'main';
 type Status = 'idle' | 'connecting' | 'active';
 type ObsStatus = 'off' | 'starting' | 'running';
+type SttMode = 'local' | 'remote';
 
 interface LogEntry {
   type: 'stt' | 'ai-text' | 'ai-audio' | 'ai-video' | 'system' | 'debug';
   text: string;
   timestamp: number;
+}
+
+interface Scene {
+  id: string;
+  name: string;
+  scene_type: string;
+  language: string;
+  is_default: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +152,113 @@ function AvatarWindow() {
           <div>啟動中...</div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OverlayWindow — 半透明懸浮提示視窗（Mode 1 用）
+// ---------------------------------------------------------------------------
+function OverlayWindow() {
+  const [text, setText] = useState('');
+  const [visible, setVisible] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const unlisten = listen<string>('overlay-text-update', (event) => {
+      if (event.payload) {
+        setText(event.payload);
+        setVisible(true);
+        // 自動隱藏計時器（15 秒後淡出）
+        if (fadeTimer.current) clearTimeout(fadeTimer.current);
+        fadeTimer.current = setTimeout(() => setVisible(false), 15000);
+      }
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  // 拖曳功能
+  const handleMouseDown = async () => {
+    setIsDragging(true);
+    try {
+      await getCurrentWindow().startDragging();
+    } catch (_) {}
+    setIsDragging(false);
+  };
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      style={{
+        width: '100vw',
+        height: '100vh',
+        background: 'transparent',
+        cursor: isDragging ? 'grabbing' : 'grab',
+        userSelect: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 12,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      }}
+    >
+      <div style={{
+        width: '100%',
+        maxHeight: '100%',
+        background: 'rgba(15, 23, 42, 0.88)',
+        borderRadius: 14,
+        padding: '16px 20px',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        border: '1px solid rgba(99, 102, 241, 0.3)',
+        opacity: visible ? 1 : 0.3,
+        transition: 'opacity 0.5s ease',
+        overflow: 'auto',
+      }}>
+        {/* 頂部指示條 */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          marginBottom: text ? 10 : 0,
+        }}>
+          <div style={{
+            width: 8, height: 8, borderRadius: 4,
+            background: visible ? '#4ade80' : '#475569',
+            transition: 'background 0.3s',
+          }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8' }}>
+            AI 建議回答
+          </span>
+          <span style={{
+            marginLeft: 'auto', fontSize: 10, color: '#475569',
+          }}>
+            拖曳移動
+          </span>
+        </div>
+
+        {/* AI 建議文字 */}
+        {text ? (
+          <div style={{
+            fontSize: 18,
+            fontWeight: 500,
+            color: '#f1f5f9',
+            lineHeight: 1.6,
+            letterSpacing: 0.3,
+          }}>
+            {text}
+          </div>
+        ) : (
+          <div style={{
+            fontSize: 14,
+            color: '#64748b',
+            textAlign: 'center',
+            padding: '8px 0',
+          }}>
+            等待 AI 回覆...
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -353,10 +469,13 @@ function SetupPage({ onDone }: { onDone: () => void }) {
 // Main App
 // ---------------------------------------------------------------------------
 function App() {
-  // 判斷是否為 Avatar 獨立視窗
+  // 判斷視窗類型
   const windowLabel = getCurrentWindow().label;
   if (windowLabel === 'avatar') {
     return <AvatarWindow />;
+  }
+  if (windowLabel === 'overlay') {
+    return <OverlayWindow />;
   }
 
   return <MainApp />;
@@ -372,7 +491,16 @@ function MainApp() {
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
   const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '3'));
   const [voiceGender, setVoiceGender] = useState<'male' | 'female'>(() => (localStorage.getItem('voiceGender') as any) || 'female');
+  const [sttMode, setSttMode] = useState<SttMode>(() => (localStorage.getItem('sttMode') as SttMode) || 'remote');
   const [showSettings, setShowSettings] = useState(false);
+
+  // 場景
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [activeSceneId, setActiveSceneId] = useState(() => localStorage.getItem('activeSceneId') || '');
+
+  // 本機 STT 狀態
+  const [sttModelStatus, setSttModelStatus] = useState<{ ready: boolean; cli_downloaded: boolean; model_downloaded: boolean }>({ ready: false, cli_downloaded: false, model_downloaded: false });
+  const [sttDownloadProgress, setSttDownloadProgress] = useState('');
 
   // Runtime state
   const [status, setStatus] = useState<Status>('idle');
@@ -402,7 +530,9 @@ function MainApp() {
     localStorage.setItem('gpuUrl', gpuUrl);
     localStorage.setItem('mode', mode.toString());
     localStorage.setItem('voiceGender', voiceGender);
-  }, [apiUrl, gpuUrl, mode, voiceGender]);
+    localStorage.setItem('sttMode', sttMode);
+    if (activeSceneId) localStorage.setItem('activeSceneId', activeSceneId);
+  }, [apiUrl, gpuUrl, mode, voiceGender, sttMode, activeSceneId]);
 
   useEffect(() => {
     if (token) localStorage.setItem('token', token);
@@ -457,6 +587,8 @@ function MainApp() {
             }
             return [...prev, { type: 'ai-text', text, timestamp: Date.now() }];
           });
+          // Mode 1: 同步更新懸浮提示視窗
+          invoke('update_overlay_text', { text }).catch(() => {});
         } else if (msg.type === 'tts_audio') {
           // 舊模式（非串流回退）：整段音訊
           const audioUrl = msg.data?.audio_url || '';
@@ -512,14 +644,39 @@ function MainApp() {
       addLog('system', event.payload);
     });
 
+    // STT 模型下載進度
+    const unlisten6 = listen<string>('stt-download-progress', (event) => {
+      setSttDownloadProgress(event.payload);
+    });
+
     return () => {
       unlisten1.then(fn => fn());
       unlisten2.then(fn => fn());
       unlisten3.then(fn => fn());
       unlisten4.then(fn => fn());
       unlisten5.then(fn => fn());
+      unlisten6.then(fn => fn());
     };
   }, []);
+
+  // 登入後載入場景列表 + 檢查本機 STT 模型
+  useEffect(() => {
+    if (!token) return;
+    // 取得場景
+    invoke('api_fetch_scenes', { apiUrl, token }).then((resp: any) => {
+      const list = resp?.data || [];
+      setScenes(list);
+      // 自動選擇預設場景
+      const defaultScene = list.find((s: Scene) => s.is_default);
+      if (defaultScene && !activeSceneId) {
+        setActiveSceneId(defaultScene.id);
+      }
+    }).catch(() => {});
+    // 檢查 STT 模型
+    invoke('get_stt_model_status').then((status: any) => {
+      setSttModelStatus(status);
+    }).catch(() => {});
+  }, [token, apiUrl]);
 
   // -----------------------------------------------------------------------
   // 播放 Avatar 影片
@@ -717,9 +874,19 @@ function MainApp() {
       await invoke('connect_session', { apiUrl, token, sessionId: sid, mode });
       addLog('system', 'WebSocket 已連線');
 
+      // Mode 1: 開啟懸浮提示視窗
+      if (mode === 1) {
+        try {
+          await invoke('open_overlay_window');
+          addLog('system', '懸浮提示視窗已開啟');
+        } catch (err: any) {
+          addLog('system', `提示視窗: ${err}`);
+        }
+      }
+
       addLog('system', '啟動音訊擷取 + 語音辨識...');
-      await invoke('start_auto_mode', { app: null, gpuUrl, mode });
-      addLog('system', '自動模式已啟動 — AI 分身就緒！');
+      await invoke('start_auto_mode', { app: null, gpuUrl, mode, sttMode });
+      addLog('system', `自動模式已啟動 — AI 分身就緒！(${sttMode === 'local' ? '本機 STT' : '雲端 STT'})`);
 
       setStatus('active');
     } catch (e: any) {
@@ -733,6 +900,7 @@ function MainApp() {
       await invoke('stop_auto_mode');
       await invoke('disconnect_session');
       invoke('close_avatar_window').catch(() => {});
+      invoke('close_overlay_window').catch(() => {});
       // 自動清理 OBS（停止虛擬鏡頭 + 關閉 OBS）
       invoke('cleanup_obs').catch(() => {});
       // 還原 Windows 預設麥克風和攝影機
@@ -925,6 +1093,99 @@ function MainApp() {
               </div>
             </div>
           )}
+
+          {/* 場景選擇 */}
+          {scenes.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>
+                場景
+              </label>
+              <select
+                value={activeSceneId}
+                onChange={e => {
+                  setActiveSceneId(e.target.value);
+                  if (e.target.value) {
+                    invoke('api_set_default_scene', { apiUrl, token, sceneId: e.target.value }).catch(() => {});
+                  }
+                }}
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  borderRadius: 6,
+                  border: `1px solid ${dark ? '#334155' : '#cbd5e1'}`,
+                  background: dark ? '#0f172a' : '#fff',
+                  color: dark ? '#e2e8f0' : '#1e293b',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                }}
+              >
+                <option value="">未選擇（使用預設）</option>
+                {scenes.map(s => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {s.is_default ? '(預設)' : ''} — {s.scene_type}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* STT 模式 */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>
+              語音辨識
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => setSttMode('remote')} style={{
+                flex: 1,
+                padding: '6px 0',
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                border: `2px solid ${sttMode === 'remote' ? '#3b82f6' : (dark ? '#475569' : '#cbd5e1')}`,
+                background: sttMode === 'remote' ? 'rgba(59,130,246,0.2)' : 'transparent',
+                color: sttMode === 'remote' ? '#60a5fa' : (dark ? '#94a3b8' : '#64748b'),
+              }}>
+                雲端（準確）
+              </button>
+              <button onClick={async () => {
+                setSttMode('local');
+                if (!sttModelStatus.ready) {
+                  setSttDownloadProgress('準備本機模型...');
+                  try {
+                    await invoke('init_local_stt');
+                    const status: any = await invoke('get_stt_model_status');
+                    setSttModelStatus(status);
+                    setSttDownloadProgress('');
+                  } catch (err: any) {
+                    setSttDownloadProgress(`失敗: ${err}`);
+                  }
+                }
+              }} style={{
+                flex: 1,
+                padding: '6px 0',
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                border: `2px solid ${sttMode === 'local' ? '#10b981' : (dark ? '#475569' : '#cbd5e1')}`,
+                background: sttMode === 'local' ? 'rgba(16,185,129,0.2)' : 'transparent',
+                color: sttMode === 'local' ? '#6ee7b7' : (dark ? '#94a3b8' : '#64748b'),
+              }}>
+                本機（快速）
+              </button>
+            </div>
+            {sttDownloadProgress && (
+              <div style={{ fontSize: 10, color: '#fbbf24', marginTop: 4 }}>
+                {sttDownloadProgress}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
+              {sttMode === 'local'
+                ? (sttModelStatus.ready ? '本機 Whisper 已就緒，無需上傳音訊' : '首次使用需下載 CLI + 模型 (~150MB)')
+                : '使用 GPU 伺服器（Whisper large-v3），準確度最高'}
+            </div>
+          </div>
 
           {/* Logout */}
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -1203,7 +1464,7 @@ function MainApp() {
               gap: 8,
             }}>
               <div style={{ fontSize: 12, color: '#64748b', flexShrink: 0 }}>
-                Mode {mode} | Session: {sessionId.slice(0, 8)}...
+                Mode {mode}{activeSceneId ? ` | ${scenes.find(s => s.id === activeSceneId)?.name || '場景'}` : ''} | {sessionId.slice(0, 8)}...
               </div>
               <form onSubmit={async (e) => {
                 e.preventDefault();
