@@ -848,12 +848,8 @@ function MainApp() {
     }
   };
 
-  // 顯示設定指南後，確認再啟動
+  // 直接啟動（不再顯示設定指南彈窗）
   const handleStartClick = () => {
-    if (mode >= 2 && !localStorage.getItem('setupGuideShown')) {
-      setShowSetupGuide(true);
-      return;
-    }
     handleStart();
   };
 
@@ -954,10 +950,15 @@ function MainApp() {
       }
 
       addLog('system', '啟動音訊擷取 + 語音辨識...');
-      await invoke('start_auto_mode', { app: null, gpuUrl, mode, sttMode });
-      addLog('system', `自動模式已啟動 — AI 分身就緒！(${sttMode === 'local' ? '本機 STT' : '雲端 STT'})`);
+      try {
+        await invoke('start_auto_mode', { app: null, gpuUrl, mode, sttMode });
+        addLog('system', `自動模式已啟動 — AI 分身就緒！(${sttMode === 'local' ? '本機 STT' : '雲端 STT'})`);
+      } catch (audioErr: any) {
+        addLog('system', `音訊擷取失敗（${audioErr}）— 可用下方文字輸入測試`);
+      }
 
       setStatus('active');
+      addLog('system', 'AI 分身已連線！請開始通話或使用下方文字輸入框測試。');
     } catch (e: any) {
       addLog('system', `啟動失敗: ${e.message || e}`);
       // 清理：關閉所有可能已開啟的視窗 + 還原設定
