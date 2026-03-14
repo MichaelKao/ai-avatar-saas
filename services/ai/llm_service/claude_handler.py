@@ -94,37 +94,31 @@ class ClaudeHandler:
 
 def _find_cut_position(buffer: str) -> int | None:
     """找到最佳切段位置 — 越早切越好，讓 TTS 盡快開始
-    1. 句子分隔符（。？！.?!）→ 任何長度都切
-    2. 逗號級分隔符（，、；,;：:）→ 至少 MIN_CHUNK_LEN 字元才切
-    3. 超過 MAX_CHUNK_LEN → 強制切斷，不等標點
+    優先級：MAX_CHUNK_LEN 內的標點 > MAX_CHUNK_LEN 強制切 > 標點
     """
-    # 合併所有分隔符一起找最早的切點
+    if len(buffer) < MIN_CHUNK_LEN:
+        return None
+
+    # 找所有分隔符的最早切點
     earliest = None
-    for sep in SENTENCE_SEPARATORS:
+    for sep in SENTENCE_SEPARATORS + CLAUSE_SEPARATORS:
         pos = buffer.find(sep)
         if pos >= 0:
             cut = pos + len(sep)
-            if earliest is None or cut < earliest:
-                earliest = cut
+            if cut >= MIN_CHUNK_LEN:
+                if earliest is None or cut < earliest:
+                    earliest = cut
 
-    # 句子分隔符找到就直接切（不管長度）
-    if earliest is not None:
+    # 如果分隔符在 MAX_CHUNK_LEN 以內，用它
+    if earliest is not None and earliest <= MAX_CHUNK_LEN:
         return earliest
 
-    # 逗號級分隔符（需要最小長度 MIN_CHUNK_LEN）
-    if len(buffer) >= MIN_CHUNK_LEN:
-        for sep in CLAUSE_SEPARATORS:
-            pos = buffer.find(sep)
-            if pos >= 0:
-                cut = pos + len(sep)
-                if cut >= MIN_CHUNK_LEN:
-                    if earliest is None or cut < earliest:
-                        earliest = cut
-        if earliest is not None:
-            return earliest
-
-    # 超過 MAX_CHUNK_LEN 強制切斷（不等任何標點）
+    # 超過 MAX_CHUNK_LEN 強制切（不等標點）
     if len(buffer) >= MAX_CHUNK_LEN:
         return MAX_CHUNK_LEN
+
+    # 分隔符雖然超過 MAX_CHUNK_LEN，但 buffer 還不夠長就先用分隔符
+    if earliest is not None:
+        return earliest
 
     return None
