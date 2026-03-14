@@ -266,10 +266,15 @@ async def melo_synthesize_speech(request: StreamTTSRequest):
         raise HTTPException(503, "MeloTTS 未載入")
 
     try:
+        import asyncio
         filename = f"melo_{uuid.uuid4().hex[:8]}.wav"
         output_path = str(OUTPUT_DIR / filename)
-        speaker_id = melotts_speaker_ids.get("ZH", list(melotts_speaker_ids.values())[0])
-        melotts_model.tts_to_file(request.text, speaker_id, output_path, speed=1.0)
+        speaker_id = melotts_speaker_ids["ZH"]
+        # 在 executor 中執行同步 TTS，避免阻塞 event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, melotts_model.tts_to_file, request.text, speaker_id, output_path, 1.0
+        )
         return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
     except Exception as e:
         logger.error(f"MeloTTS 合成失敗: {e}")
