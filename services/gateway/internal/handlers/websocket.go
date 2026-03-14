@@ -178,7 +178,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		if err != nil {
 			// 使用預設值
 			personality.SystemPrompt = "你是 AI 會議助手，替用戶參加視訊會議。規則：1)回答控制在100字以內，像真人對話一樣簡短自然 2)絕對不要說「再見」「下次見」「期待下次」等告別語 3)聽不懂就請對方再說一次 4)忽略亂碼和語音辨識雜訊 5)使用繁體中文"
-			personality.LLMModel = "claude-sonnet-4-6"
+			personality.LLMModel = "claude-haiku-4-5-20251001"
 			personality.Temperature = 0.7
 			personality.Language = "zh-TW"
 		}
@@ -452,8 +452,47 @@ func callGPUAvatar(text, voiceID, voiceGender, faceImageURL, faceImageBase64 str
 	return audioURL, videoURL, nil
 }
 
-// callFastTTS 呼叫 Edge TTS 快速語音合成（<1 秒，無需 GPU）
-func callFastTTS(text, voiceGender string) (string, error) {
+// callCosyVoiceTTS 呼叫 CosyVoice 語音合成（優先），回退到 Edge TTS
+func callCosyVoiceTTS(text, voiceGender string) (string, error) {
+	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
+	if gpuServiceURL == "" {
+		gpuServiceURL = "http://localhost:8002"
+	}
+
+	// 呼叫 CosyVoice synthesize 端點（合成完存檔回 URL）
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_id":     "default",
+		"voice_gender": voiceGender,
+	})
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(
+		gpuServiceURL+"/api/v1/tts/synthesize",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		log.Printf("CosyVoice TTS 失敗，回退 Edge TTS: %v", err)
+		return callEdgeTTS(text, voiceGender)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("CosyVoice TTS 錯誤 (%d): %s，回退 Edge TTS", resp.StatusCode, string(body))
+		return callEdgeTTS(text, voiceGender)
+	}
+
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return callEdgeTTS(text, voiceGender)
+	}
+	return gpuServiceURL + gpuResp.Data.AudioURL, nil
+}
+
+// callEdgeTTS 呼叫 Edge TTS 快速語音合成（回退用）
+func callEdgeTTS(text, voiceGender string) (string, error) {
 	gpuServiceURL := os.Getenv("GPU_SERVICE_URL")
 	if gpuServiceURL == "" {
 		gpuServiceURL = "http://localhost:8002"
@@ -665,7 +704,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				if useCustomVoice {
 					url, ttsErr = callGPUTTS(s, voiceID, voiceGender)
 				} else {
-					url, ttsErr = callFastTTS(s, voiceGender)
+					url, ttsErr = callCosyVoiceTTS(s, voiceGender)
 				}
 
 				if ttsErr != nil {
@@ -812,7 +851,7 @@ func (h *WebSocketHandler) processNonStreaming(
 				audioURL, ttsErr = callGPUTTS(aiResponse.Text, voiceID, voiceGender)
 			}
 		} else {
-			audioURL, ttsErr = callFastTTS(aiResponse.Text, voiceGender)
+			audioURL, ttsErr = callCosyVoiceTTS(aiResponse.Text, voiceGender)
 			if ttsErr == nil && audioURL != "" && msg.Mode == 3 {
 				go func(aURL, fURL, fBase64, sid string) {
 					vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)

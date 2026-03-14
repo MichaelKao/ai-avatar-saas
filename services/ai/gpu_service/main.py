@@ -33,7 +33,7 @@ for d in [MODEL_DIR, UPLOAD_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Whisper STT 設定
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
 
 # 全域模型變數
 cosyvoice_model = None
@@ -152,17 +152,24 @@ async def clone_voice(voice_sample: UploadFile = File(...)):
 
 @app.post("/api/v1/tts/synthesize")
 async def synthesize_speech(request: TTSRequest):
-    """文字 → 語音（使用克隆的聲音或預設聲音），回傳可下載的音訊 URL"""
-    if cosyvoice_model is None:
-        raise HTTPException(503, "CosyVoice 模型未載入")
+    """文字 → 語音（CosyVoice 優先，Edge TTS 回退），回傳可下載的音訊 URL"""
+    if cosyvoice_model is not None:
+        try:
+            filename = f"tts_{uuid.uuid4()}.wav"
+            output_path = OUTPUT_DIR / filename
+            if request.voice_id == "default":
+                cosyvoice_model.synthesize_default(request.text, str(output_path), voice_gender=request.voice_gender)
+            else:
+                cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
+            return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+        except Exception as e:
+            logger.warning(f"CosyVoice 合成失敗，回退 Edge TTS: {e}")
 
+    # 回退到 Edge TTS
     try:
-        filename = f"tts_{uuid.uuid4()}.wav"
-        output_path = OUTPUT_DIR / filename
-        if request.voice_id == "default":
-            cosyvoice_model.synthesize_default(request.text, str(output_path), voice_gender=request.voice_gender)
-        else:
-            cosyvoice_model.synthesize(request.text, request.voice_id, str(output_path))
+        from edge_tts_handler import fast_synthesize
+        output_path = await fast_synthesize(request.text, request.voice_gender)
+        filename = Path(output_path).name
         return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
     except Exception as e:
         raise HTTPException(500, f"語音合成失敗: {str(e)}")
