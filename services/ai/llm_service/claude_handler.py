@@ -13,8 +13,8 @@ SENTENCE_SEPARATORS = ["。", "？", "！", ".", "?", "!"]
 CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";", "：", ":"]
 # 最小 chunk 長度（2 字元即切，讓首句盡快送出 TTS）
 MIN_CHUNK_LEN = 2
-# 最大 chunk 長度（超過就強制切斷，不等標點）
-MAX_CHUNK_LEN = 5
+# 最大 chunk 長度（超過就強制切斷，不等標點。3 字即切 — MeloTTS 3 字只需 ~120ms）
+MAX_CHUNK_LEN = 3
 
 
 class ClaudeHandler:
