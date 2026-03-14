@@ -210,8 +210,12 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			userID,
 		)
 
+		// 記住活躍場景 ID（RAG 檢索用）
+		var activeSceneID string
+
 		if sceneErr == nil {
 			// 有預設場景，組合 system prompt
+			activeSceneID = scene.ID
 			personality.LLMModel = scene.LLMModel
 			personality.Temperature = scene.Temperature
 			personality.Language = scene.Language
@@ -268,23 +272,56 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				}
 			}
 
-			// 組合知識庫
-			var kbItems []struct {
-				Title   string `db:"title"`
-				Content string `db:"content"`
-			}
-			h.db.Select(&kbItems,
-				`SELECT title, content FROM knowledge_bases
-				 WHERE scene_id = $1 AND user_id = $2 AND deleted_at IS NULL
-				 ORDER BY created_at LIMIT 5`,
+			// 組合知識庫（優先使用分塊，回退到完整內容）
+			var kbBlock string
+
+			// 先檢查是否有 embedding_chunks
+			var chunkCount int
+			h.db.Get(&chunkCount,
+				`SELECT COUNT(*) FROM embedding_chunks WHERE scene_id = $1 AND user_id = $2`,
 				scene.ID, userID,
 			)
 
-			var kbBlock string
-			if len(kbItems) > 0 {
-				kbBlock = "\n\n【參考知識庫】\n"
-				for _, item := range kbItems {
-					kbBlock += "## " + item.Title + "\n" + item.Content + "\n\n"
+			if chunkCount > 0 {
+				// 有分塊 → 使用分塊作為知識庫上下文
+				var chunks []struct {
+					ChunkText string `db:"chunk_text"`
+					Title     string `db:"title"`
+				}
+				h.db.Select(&chunks,
+					`SELECT ec.chunk_text, kb.title
+					 FROM embedding_chunks ec
+					 JOIN knowledge_bases kb ON ec.knowledge_base_id = kb.id AND kb.deleted_at IS NULL
+					 WHERE ec.scene_id = $1 AND ec.user_id = $2
+					 ORDER BY ec.chunk_index
+					 LIMIT 10`,
+					scene.ID, userID,
+				)
+
+				if len(chunks) > 0 {
+					kbBlock = "\n\n【參考知識庫】\n"
+					for _, chunk := range chunks {
+						kbBlock += "## " + chunk.Title + "\n" + chunk.ChunkText + "\n\n"
+					}
+				}
+			} else {
+				// 沒有分塊 → 回退到完整知識庫內容
+				var kbItems []struct {
+					Title   string `db:"title"`
+					Content string `db:"content"`
+				}
+				h.db.Select(&kbItems,
+					`SELECT title, content FROM knowledge_bases
+					 WHERE scene_id = $1 AND user_id = $2 AND deleted_at IS NULL
+					 ORDER BY created_at LIMIT 5`,
+					scene.ID, userID,
+				)
+
+				if len(kbItems) > 0 {
+					kbBlock = "\n\n【參考知識庫】\n"
+					for _, item := range kbItems {
+						kbBlock += "## " + item.Title + "\n" + item.Content + "\n\n"
+					}
 				}
 			}
 
@@ -356,6 +393,33 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		// 每個連線記住 face_image_base64（只需傳送一次）
 		var sessionFaceBase64 string
 
+		// 場景過渡語設定
+		var transitionEnabled bool
+		var transitionStyle string
+		var sceneLanguage string
+		if sceneErr == nil {
+			transitionEnabled = scene.ID != "" // 從 scene 取
+			sceneLanguage = scene.Language
+			// 再讀一次完整 scene 以取得 transition 設定
+			var fullScene struct {
+				TransitionEnabled bool   `db:"transition_enabled"`
+				TransitionStyle   string `db:"transition_style"`
+			}
+			if h.db.Get(&fullScene,
+				`SELECT transition_enabled, transition_style FROM scenes WHERE id = $1 AND deleted_at IS NULL`,
+				scene.ID,
+			) == nil {
+				transitionEnabled = fullScene.TransitionEnabled
+				transitionStyle = fullScene.TransitionStyle
+			}
+		}
+		if sceneLanguage == "" {
+			sceneLanguage = personality.Language
+		}
+		if transitionStyle == "" {
+			transitionStyle = "natural"
+		}
+
 		// 共用 HTTP client（連線池，避免每次建立新連線）
 		httpClient := &http.Client{
 			Timeout: 60 * time.Second,
@@ -411,8 +475,13 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				cancelFunc = cancel
 				cancelMu.Unlock()
 
+				// 過渡語：Mode 2/3 + 啟用 + 看起來是問題句 → 先播過渡語
+				if latest.Mode >= 2 && transitionEnabled && looksLikeQuestion(latest.Text) {
+					go h.dispatchTransitionPhrase(ctx, conn, sessionID, sceneLanguage, transitionStyle, voiceGender, useCustomVoice)
+				}
+
 				h.processStreamingPipeline(
-					ctx, conn, httpClient, latest, sessionID, userID,
+					ctx, conn, httpClient, latest, sessionID, userID, activeSceneID,
 					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
 				)
@@ -923,6 +992,104 @@ type ttsResult struct {
 	index    int
 }
 
+// retrieveRelevantChunks 根據用戶問題的關鍵字檢索相關知識庫分塊
+// 目前使用 LIKE 匹配，未來可升級為向量相似度搜尋
+func (h *WebSocketHandler) retrieveRelevantChunks(sceneID, userID, questionText string, limit int) string {
+	if sceneID == "" || questionText == "" {
+		return ""
+	}
+
+	// 提取關鍵字（去除常見停用詞，取有意義的詞）
+	// 中文不需分詞，直接用整段文字做 LIKE 匹配
+	// 同時也提取 2-4 字的子串作為關鍵字
+	stopWords := map[string]bool{
+		"的": true, "了": true, "是": true, "在": true, "我": true, "有": true,
+		"和": true, "就": true, "不": true, "人": true, "都": true, "一": true,
+		"這": true, "中": true, "大": true, "為": true, "上": true, "個": true,
+		"到": true, "說": true, "們": true, "吧": true, "嗎": true, "啊": true,
+		"呢": true, "那": true, "他": true, "她": true, "你": true, "也": true,
+		"the": true, "is": true, "a": true, "an": true, "and": true, "or": true,
+		"of": true, "to": true, "in": true, "it": true, "for": true, "on": true,
+		"what": true, "how": true, "why": true, "when": true, "where": true, "who": true,
+		"can": true, "do": true, "does": true, "this": true, "that": true,
+		"什麼": true, "怎麼": true, "為什麼": true, "哪裡": true, "如何": true,
+		"請問": true, "可以": true, "能不能": true,
+	}
+
+	// 按空白和標點拆分
+	words := strings.FieldsFunc(questionText, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '，' || r == '。' || r == '？' ||
+			r == '！' || r == '、' || r == '\n' || r == '\t' ||
+			r == '?' || r == '!' || r == '.' || r == ';' || r == '；'
+	})
+
+	var keywords []string
+	for _, w := range words {
+		w = strings.TrimSpace(w)
+		if w == "" || stopWords[w] {
+			continue
+		}
+		if len([]rune(w)) >= 2 {
+			keywords = append(keywords, w)
+		}
+	}
+
+	if len(keywords) == 0 {
+		return ""
+	}
+
+	// 限制關鍵字數量
+	if len(keywords) > 5 {
+		keywords = keywords[:5]
+	}
+
+	// 建構 LIKE 查詢：任一關鍵字命中即可
+	var conditions []string
+	var args []interface{}
+	argIdx := 3 // $1=sceneID, $2=userID
+	for _, kw := range keywords {
+		argIdx++
+		conditions = append(conditions, fmt.Sprintf("ec.chunk_text ILIKE $%d", argIdx))
+		args = append(args, "%"+kw+"%")
+	}
+
+	query := fmt.Sprintf(
+		`SELECT ec.chunk_text, kb.title
+		 FROM embedding_chunks ec
+		 JOIN knowledge_bases kb ON ec.knowledge_base_id = kb.id AND kb.deleted_at IS NULL
+		 WHERE ec.scene_id = $1 AND ec.user_id = $2 AND (%s)
+		 ORDER BY ec.chunk_index
+		 LIMIT $3`,
+		strings.Join(conditions, " OR "),
+	)
+
+	// 組合所有參數
+	allArgs := make([]interface{}, 0, len(args)+3)
+	allArgs = append(allArgs, sceneID, userID, limit)
+	allArgs = append(allArgs, args...)
+
+	var chunks []struct {
+		ChunkText string `db:"chunk_text"`
+		Title     string `db:"title"`
+	}
+	err := h.db.Select(&chunks, query, allArgs...)
+	if err != nil {
+		log.Printf("RAG 分塊檢索失敗: %v", err)
+		return ""
+	}
+
+	if len(chunks) == 0 {
+		return ""
+	}
+
+	var ragBlock strings.Builder
+	ragBlock.WriteString("\n\n【相關參考資料】\n")
+	for _, chunk := range chunks {
+		ragBlock.WriteString("## " + chunk.Title + "\n" + chunk.ChunkText + "\n\n")
+	}
+	return ragBlock.String()
+}
+
 // processStreamingPipeline 串流 LLM + 逐句 TTS 即時派發 Pipeline
 // 核心優化：LLM 逗號級切段 → 每段立刻 TTS → 立刻送 tts_audio_chunk 給 client
 func (h *WebSocketHandler) processStreamingPipeline(
@@ -930,7 +1097,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	conn *websocket.Conn,
 	httpClient *http.Client,
 	msg TranscriptionMessage,
-	sessionID, userID string,
+	sessionID, userID, sceneID string,
 	systemPrompt, llmModel string, temperature float64, language string,
 	voiceGender, voiceID string,
 	useCustomVoice bool,
@@ -940,12 +1107,23 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	if aiServiceURL == "" {
 		aiServiceURL = "http://localhost:8001"
 	}
+
+	// RAG：根據用戶問題檢索相關知識庫分塊，補充到 system prompt
+	finalPrompt := systemPrompt
+	if sceneID != "" {
+		ragContext := h.retrieveRelevantChunks(sceneID, userID, msg.Text, 3)
+		if ragContext != "" {
+			finalPrompt = systemPrompt + ragContext
+			log.Printf("RAG 增強 prompt（+%d 字元）", len(ragContext))
+		}
+	}
+
 	// 嘗試串流，失敗則回退到非串流
 	reqBody, _ := json.Marshal(AIServiceRequest{
 		Text:         msg.Text,
 		SessionID:    sessionID,
 		UserID:       userID,
-		SystemPrompt: systemPrompt,
+		SystemPrompt: finalPrompt,
 		LLMModel:     llmModel,
 		Temperature:  temperature,
 		Language:     language,
@@ -1281,4 +1459,95 @@ func callAIService(req AIServiceRequest) (*AIServiceResponse, error) {
 	}
 
 	return &aiResp, nil
+}
+
+// looksLikeQuestion 判斷文字是否為問題句（值得播放過渡語）
+func looksLikeQuestion(text string) bool {
+	questionMarkers := []string{
+		"？", "?", "嗎", "什麼", "怎麼", "為什麼", "哪", "誰", "幾",
+		"how", "what", "why", "where", "when", "who", "which",
+		"可以", "能不能", "是不是", "有沒有", "對不對",
+	}
+	lower := strings.ToLower(text)
+	for _, m := range questionMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	// 長句也播放過渡語（對方說了一段話，AI 需要思考時間）
+	return len([]rune(text)) > 20
+}
+
+// dispatchTransitionPhrase 即時播放過渡語（<200ms，不等 LLM）
+func (h *WebSocketHandler) dispatchTransitionPhrase(
+	ctx context.Context,
+	conn *websocket.Conn,
+	sessionID, language, style, voiceGender string,
+	useCustomVoice bool,
+) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	// 從 DB 隨機取一句過渡語
+	var phrase struct {
+		Phrase      string  `db:"phrase"`
+		AudioBase64 *string `db:"audio_base64"`
+	}
+	err := h.db.Get(&phrase,
+		`SELECT phrase, audio_base64 FROM transition_phrases
+		 WHERE language = $1 AND style = $2 AND deleted_at IS NULL
+		 ORDER BY RANDOM() LIMIT 1`,
+		language, style,
+	)
+	if err != nil || phrase.Phrase == "" {
+		return
+	}
+
+	// 如果已有快取音訊 → 直接送
+	if phrase.AudioBase64 != nil && *phrase.AudioBase64 != "" {
+		writeWSMessage(conn, WSMessage{
+			Type: "tts_audio_chunk",
+			Data: fiber.Map{
+				"audio_base64":  *phrase.AudioBase64,
+				"index":         -1, // -1 表示過渡語
+				"is_transition": true,
+				"session_id":    sessionID,
+			},
+		})
+		log.Printf("過渡語已送出（快取）: %s", phrase.Phrase)
+		return
+	}
+
+	// 沒有快取 → 即時 TTS 生成
+	if useCustomVoice {
+		return // 自訂聲音不生成過渡語（風格不一致）
+	}
+
+	b64, ttsErr := callMeloTTS(ctx, phrase.Phrase, voiceGender)
+	if ttsErr != nil || b64 == "" {
+		return
+	}
+
+	writeWSMessage(conn, WSMessage{
+		Type: "tts_audio_chunk",
+		Data: fiber.Map{
+			"audio_base64":  b64,
+			"index":         -1,
+			"is_transition": true,
+			"session_id":    sessionID,
+		},
+	})
+	log.Printf("過渡語已送出（即時 TTS）: %s", phrase.Phrase)
+
+	// 背景快取這段音訊，下次直接用
+	go func() {
+		h.db.Exec(
+			`UPDATE transition_phrases SET audio_base64 = $1, is_cached = TRUE
+			 WHERE phrase = $2 AND language = $3 AND style = $4 AND deleted_at IS NULL`,
+			b64, phrase.Phrase, language, style,
+		)
+	}()
 }

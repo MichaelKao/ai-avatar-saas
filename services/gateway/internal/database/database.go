@@ -30,6 +30,8 @@ func Connect() (*sqlx.DB, error) {
 // Migrate 執行資料庫 schema migration（逐個表執行，避免衝突）
 func Migrate(db *sqlx.DB) error {
 	statements := []string{
+		// 啟用 pgvector 擴展（RAG 向量搜尋）
+		`CREATE EXTENSION IF NOT EXISTS vector`,
 		// 用戶表
 		`CREATE TABLE IF NOT EXISTS users (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -187,6 +189,17 @@ func Migrate(db *sqlx.DB) error {
 			created_at TIMESTAMP DEFAULT NOW(),
 			deleted_at TIMESTAMP
 		)`,
+		// 嵌入向量分塊表（RAG）
+		`CREATE TABLE IF NOT EXISTS embedding_chunks (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			knowledge_base_id UUID REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+			scene_id UUID REFERENCES scenes(id) ON DELETE CASCADE,
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			chunk_text TEXT NOT NULL,
+			chunk_index INTEGER NOT NULL,
+			embedding vector(1536),
+			created_at TIMESTAMP DEFAULT NOW()
+		)`,
 		// 索引
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)`,
@@ -204,6 +217,9 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_user_profiles_scene_id ON user_profiles(scene_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transition_phrases_lang_style ON transition_phrases(language, style)`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_chunks_scene_id ON embedding_chunks(scene_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_chunks_knowledge_base_id ON embedding_chunks(knowledge_base_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_chunks_user_id ON embedding_chunks(user_id)`,
 	}
 
 	for _, stmt := range statements {
