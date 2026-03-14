@@ -580,17 +580,23 @@ fn play_wav_to_vbcable_sync(wav_bytes: &[u8]) -> Result<String, String> {
         return Err("音訊資料為空".to_string());
     }
 
-    // Find VB-Cable output device
+    // 找到 VB-Cable 輸出裝置（若無則退回預設輸出裝置）
     let host = cpal::default_host();
     let vb_device = host.output_devices()
-        .map_err(|e| format!("列舉裝置失敗: {}", e))?
-        .find(|d| {
-            d.name().map(|n| {
-                let lower = n.to_lowercase();
-                lower.contains("cable") && lower.contains("input")
-            }).unwrap_or(false)
-        })
-        .ok_or_else(|| "找不到 VB-Cable Input 裝置，請先安裝 VB-Cable".to_string())?;
+        .ok()
+        .and_then(|mut devs| {
+            devs.find(|d| {
+                d.name().map(|n| {
+                    let lower = n.to_lowercase();
+                    lower.contains("cable") && lower.contains("input")
+                }).unwrap_or(false)
+            })
+        });
+    let vb_device = match vb_device {
+        Some(dev) => dev,
+        None => host.default_output_device()
+            .ok_or_else(|| "找不到任何音訊輸出裝置".to_string())?,
+    };
 
     let device_name = vb_device.name().unwrap_or_default();
 

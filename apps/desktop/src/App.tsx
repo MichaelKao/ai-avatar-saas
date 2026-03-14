@@ -549,7 +549,17 @@ function MainApp() {
     return stored || 'https://ai-avatar-saas-production.up.railway.app';
   });
   const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
-  const [mode, setMode] = useState(() => parseInt(localStorage.getItem('mode') || '2'));
+  const [mode, setMode] = useState(() => {
+    const stored = localStorage.getItem('mode');
+    // 舊版預設 Mode 3 需要 OBS，新版降級為 Mode 2 更穩定
+    if (stored === '3' && !localStorage.getItem('v07_migrated')) {
+      localStorage.setItem('mode', '2');
+      localStorage.setItem('v07_migrated', 'true');
+      return 2;
+    }
+    localStorage.setItem('v07_migrated', 'true');
+    return parseInt(stored || '2');
+  });
   const [voiceGender, setVoiceGender] = useState<'male' | 'female'>(() => (localStorage.getItem('voiceGender') as any) || 'female');
   const [sttMode, setSttMode] = useState<SttMode>(() => (localStorage.getItem('sttMode') as SttMode) || 'remote');
   const [showSettings, setShowSettings] = useState(false);
@@ -873,25 +883,24 @@ function MainApp() {
         });
       }
 
-      // Step 2: Mode 3 — 開啟 Avatar 視窗 + OBS（Avatar 視窗會自動開啟 webcam）
+      // Step 2: Mode 3 — 開啟 Avatar 視窗 + OBS（非致命，失敗降級為語音模式）
       if (mode === 3) {
-        addLog('system', '正在準備虛擬鏡頭環境...');
-        await invoke('ensure_obs_ready');
-
-        // 開啟 Avatar 視窗（內建 webcam 畫面，給 OBS 擷取用）
-        await invoke('open_avatar_window');
-        // 等待 Avatar 視窗完全載入（確保事件監聽器已就緒）
-        await new Promise(r => setTimeout(r, 1500));
-
-        // 傳送臉部截圖到 Avatar 視窗（webcam 不可用時的備用畫面）
-        if (faceBase64) {
-          invoke('emit_avatar_face', { faceBase64 }).catch(() => {});
+        try {
+          addLog('system', '正在準備虛擬鏡頭環境...');
+          await invoke('ensure_obs_ready');
+          await invoke('open_avatar_window');
+          await new Promise(r => setTimeout(r, 1500));
+          if (faceBase64) {
+            invoke('emit_avatar_face', { faceBase64 }).catch(() => {});
+          }
+          const obsResult: string = await invoke('start_obs_virtual_cam', { password: null });
+          setObsStatus('running');
+          addLog('system', obsResult);
+        } catch (obsErr: any) {
+          addLog('system', `虛擬鏡頭設定失敗（${obsErr}），將以語音模式繼續`);
+          invoke('close_avatar_window').catch(() => {});
+          invoke('cleanup_obs').catch(() => {});
         }
-
-        // 設定 OBS 場景 + 啟動虛擬鏡頭
-        const obsResult: string = await invoke('start_obs_virtual_cam', { password: null });
-        setObsStatus('running');
-        addLog('system', obsResult);
       }
 
       // Step 3: 自動切換麥克風為 VB-Cable
@@ -951,6 +960,15 @@ function MainApp() {
       setStatus('active');
     } catch (e: any) {
       addLog('system', `啟動失敗: ${e.message || e}`);
+      // 清理：關閉所有可能已開啟的視窗 + 還原設定
+      invoke('close_avatar_window').catch(() => {});
+      invoke('close_overlay_window').catch(() => {});
+      invoke('cleanup_obs').catch(() => {});
+      invoke('restore_default_mic').catch(() => {});
+      invoke('restore_real_cameras').catch(() => {});
+      invoke('disconnect_session').catch(() => {});
+      invoke('stop_auto_mode').catch(() => {});
+      setObsStatus('off');
       setStatus('idle');
     }
   };
@@ -1293,13 +1311,15 @@ function MainApp() {
               <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: 'rgba(251,191,36,0.15)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }}>
                 請先關閉 YouTube、音樂等其他播放音訊的程式，否則 AI 會聽到並回應那些聲音！
               </div>
-              <p style={{ margin: '0 0 8px', fontWeight: 600 }}>請在通話軟體（LINE / Zoom / Meet）中設定：</p>
+              <p style={{ margin: '0 0 8px', fontWeight: 600 }}>使用建議：</p>
               <ol style={{ margin: '0 0 4px', paddingLeft: 20 }}>
-                <li><b>麥克風</b> → 選擇「CABLE Output (VB-Audio Virtual Cable)」</li>
-                <li><b>鏡頭</b> → 選擇「OBS Virtual Camera」</li>
+                <li>開啟通話軟體（LINE / Zoom / Meet / Teams）</li>
+                <li>開始通話後按下方「開始」</li>
+                {mode >= 2 && <li>如已安裝 VB-Cable：在通話軟體<b>麥克風</b>選「CABLE Output」</li>}
+                {mode === 3 && <li>如已安裝 OBS：在通話軟體<b>鏡頭</b>選「OBS Virtual Camera」</li>}
               </ol>
               <p style={{ margin: '8px 0 0', fontSize: 12, color: '#94a3b8' }}>
-                這樣 AI 的語音和畫面才會傳送給對方。設定完成後按下方按鈕開始。
+                即使沒有 VB-Cable，AI 也能聽取對方語音並在螢幕顯示回應。
               </p>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>

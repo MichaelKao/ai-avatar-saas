@@ -131,22 +131,28 @@ fn playback_loop(
     played_chunks: Arc<AtomicUsize>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    // 找到 VB-Cable 輸出裝置
+    // 找到 VB-Cable 輸出裝置（若無則退回預設輸出裝置）
     let host = cpal::default_host();
     let vb_device = host
         .output_devices()
-        .map_err(|e| format!("列舉裝置失敗: {}", e))?
-        .find(|d| {
-            d.name()
-                .map(|n| {
-                    let lower = n.to_lowercase();
-                    lower.contains("cable") && lower.contains("input")
-                })
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| "找不到 VB-Cable Input 裝置".to_string())?;
+        .ok()
+        .and_then(|mut devs| {
+            devs.find(|d| {
+                d.name()
+                    .map(|n| {
+                        let lower = n.to_lowercase();
+                        lower.contains("cable") && lower.contains("input")
+                    })
+                    .unwrap_or(false)
+            })
+        });
+    let output_device = match vb_device {
+        Some(dev) => dev,
+        None => host.default_output_device()
+            .ok_or_else(|| "找不到任何音訊輸出裝置".to_string())?,
+    };
 
-    let device_config = vb_device
+    let device_config = output_device
         .default_output_config()
         .map_err(|e| format!("取得設定失敗: {}", e))?;
     let device_sample_rate = device_config.sample_rate().0;
@@ -215,7 +221,7 @@ fn playback_loop(
         let done_clone = done.clone();
         let cancelled_clone = cancelled.clone();
 
-        let stream = vb_device
+        let stream = output_device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
