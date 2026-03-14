@@ -47,6 +47,9 @@ func main() {
 		log.Fatalf("資料庫 migration 失敗: %v", err)
 	}
 
+	// 種入預設過渡語
+	handlers.SeedDefaultPhrases(db)
+
 	// 建立 Fiber app
 	app := fiber.New(fiber.Config{
 		ErrorHandler: customErrorHandler,
@@ -136,6 +139,34 @@ func main() {
 	billingGroup.Post("/cancel", billingHandler.Cancel)
 	billingGroup.Get("/status", billingHandler.GetStatus)
 	billingGroup.Post("/portal", billingHandler.CreatePortalSession)
+
+	// 場景管理路由
+	sceneHandler := handlers.NewSceneHandler(db)
+	sceneGroup := protected.Group("/scenes")
+	sceneGroup.Get("/templates", sceneHandler.GetTemplates)
+	sceneGroup.Get("/", sceneHandler.List)
+	sceneGroup.Post("/", sceneHandler.Create)
+	sceneGroup.Put("/:id", sceneHandler.Update)
+	sceneGroup.Delete("/:id", sceneHandler.Delete)
+	sceneGroup.Post("/:id/set-default", sceneHandler.SetDefault)
+
+	// 知識庫路由（場景子資源）
+	kbHandler := handlers.NewKnowledgeBaseHandler(db)
+	sceneGroup.Get("/:sceneId/knowledge", kbHandler.List)
+	sceneGroup.Post("/:sceneId/knowledge", kbHandler.Create)
+	sceneGroup.Put("/knowledge/:id", kbHandler.Update)
+	sceneGroup.Delete("/knowledge/:id", kbHandler.Delete)
+
+	// 用戶場景背景路由
+	profileHandler := handlers.NewUserProfileHandler(db)
+	sceneGroup.Get("/:sceneId/profile", profileHandler.Get)
+	sceneGroup.Put("/:sceneId/profile", profileHandler.Upsert)
+
+	// 過渡語路由
+	transitionHandler := handlers.NewTransitionHandler(db, rdb)
+	transitionGroup := protected.Group("/transitions")
+	transitionGroup.Get("/", transitionHandler.List)
+	transitionGroup.Post("/cache", transitionHandler.CachePhrase)
 
 	// 日誌查詢路由（需要認證）
 	logsHandler := handlers.NewLogsHandler()

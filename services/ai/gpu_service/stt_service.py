@@ -20,9 +20,11 @@ def load():
     """載入 Whisper 模型（combined.py 呼叫）"""
     global whisper_model
     from faster_whisper import WhisperModel
-    logger.info("Loading Whisper large-v3...")
-    whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-    logger.info("Whisper model loaded")
+    model_size = os.environ.get("WHISPER_MODEL_SIZE", "large-v3")
+    compute = "int8_float16" if model_size == "large-v3" else "float16"
+    logger.info(f"Loading Whisper {model_size} (compute={compute})...")
+    whisper_model = WhisperModel(model_size, device="cuda", compute_type=compute)
+    logger.info(f"Whisper {model_size} loaded")
 
 
 @app.on_event("startup")

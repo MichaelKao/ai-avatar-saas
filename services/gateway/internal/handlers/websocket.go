@@ -181,7 +181,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			return
 		}
 
-		// 取得用戶的預設個性設定
+		// 取得用戶的預設場景設定（優先），回退到 ai_personalities
 		var personality struct {
 			SystemPrompt string  `db:"system_prompt"`
 			LLMModel     string  `db:"llm_model"`
@@ -189,20 +189,137 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			Language     string  `db:"language"`
 		}
 
-		err = h.db.Get(&personality,
-			`SELECT system_prompt, llm_model, temperature, language
-			 FROM ai_personalities
+		// 嘗試從 scenes 表取得預設場景
+		var scene struct {
+			ID                 string  `db:"id"`
+			CustomSystemPrompt *string `db:"custom_system_prompt"`
+			LLMModel           string  `db:"llm_model"`
+			Temperature        float64 `db:"temperature"`
+			Language           string  `db:"language"`
+			ReplyLanguage      string  `db:"reply_language"`
+			ReplyLength        string  `db:"reply_length"`
+			Personality        string  `db:"personality"`
+			Formality          int     `db:"formality"`
+		}
+		sceneErr := h.db.Get(&scene,
+			`SELECT id, custom_system_prompt, llm_model, temperature, language,
+			        reply_language, reply_length, personality, formality
+			 FROM scenes
 			 WHERE user_id = $1 AND is_default = TRUE AND deleted_at IS NULL
 			 LIMIT 1`,
 			userID,
 		)
 
-		if err != nil {
-			// 使用預設值
-			personality.SystemPrompt = "你是 AI 會議助手，替用戶參加視訊會議。規則：1)回答控制在100字以內，像真人對話一樣簡短自然 2)絕對不要說「再見」「下次見」「期待下次」等告別語 3)聽不懂就請對方再說一次 4)忽略亂碼和語音辨識雜訊 5)使用繁體中文"
-			personality.LLMModel = "claude-haiku-4-5-20251001"
-			personality.Temperature = 0.7
-			personality.Language = "zh-TW"
+		if sceneErr == nil {
+			// 有預設場景，組合 system prompt
+			personality.LLMModel = scene.LLMModel
+			personality.Temperature = scene.Temperature
+			personality.Language = scene.Language
+
+			// 基礎 prompt
+			basePrompt := "你是 AI 會議助手，替用戶參加視訊會議。"
+			if scene.CustomSystemPrompt != nil && *scene.CustomSystemPrompt != "" {
+				basePrompt = *scene.CustomSystemPrompt
+			}
+
+			// 組合用戶背景
+			var profile struct {
+				DisplayName      *string `db:"display_name"`
+				Title            *string `db:"title"`
+				Company          *string `db:"company"`
+				ExperienceYears  int     `db:"experience_years"`
+				Skills           *string `db:"skills"`
+				Experiences      *string `db:"experiences"`
+				CustomPhrases    *string `db:"custom_phrases"`
+				AdditionalContext *string `db:"additional_context"`
+			}
+			profileErr := h.db.Get(&profile,
+				`SELECT display_name, title, company, experience_years, skills, experiences, custom_phrases, additional_context
+				 FROM user_profiles WHERE scene_id = $1 AND user_id = $2 AND deleted_at IS NULL LIMIT 1`,
+				scene.ID, userID,
+			)
+
+			var profileBlock string
+			if profileErr == nil {
+				profileBlock = "\n\n【你的身份背景】\n"
+				if profile.DisplayName != nil && *profile.DisplayName != "" {
+					profileBlock += "姓名：" + *profile.DisplayName + "\n"
+				}
+				if profile.Title != nil && *profile.Title != "" {
+					profileBlock += "職位：" + *profile.Title + "\n"
+				}
+				if profile.Company != nil && *profile.Company != "" {
+					profileBlock += "公司：" + *profile.Company + "\n"
+				}
+				if profile.ExperienceYears > 0 {
+					profileBlock += fmt.Sprintf("年資：%d 年\n", profile.ExperienceYears)
+				}
+				if profile.Skills != nil && *profile.Skills != "" {
+					profileBlock += "技能：" + *profile.Skills + "\n"
+				}
+				if profile.Experiences != nil && *profile.Experiences != "" {
+					profileBlock += "經歷：" + *profile.Experiences + "\n"
+				}
+				if profile.CustomPhrases != nil && *profile.CustomPhrases != "" {
+					profileBlock += "口頭禪/慣用語：" + *profile.CustomPhrases + "\n"
+				}
+				if profile.AdditionalContext != nil && *profile.AdditionalContext != "" {
+					profileBlock += "其他：" + *profile.AdditionalContext + "\n"
+				}
+			}
+
+			// 組合知識庫
+			var kbItems []struct {
+				Title   string `db:"title"`
+				Content string `db:"content"`
+			}
+			h.db.Select(&kbItems,
+				`SELECT title, content FROM knowledge_bases
+				 WHERE scene_id = $1 AND user_id = $2 AND deleted_at IS NULL
+				 ORDER BY created_at LIMIT 5`,
+				scene.ID, userID,
+			)
+
+			var kbBlock string
+			if len(kbItems) > 0 {
+				kbBlock = "\n\n【參考知識庫】\n"
+				for _, item := range kbItems {
+					kbBlock += "## " + item.Title + "\n" + item.Content + "\n\n"
+				}
+			}
+
+			// 回覆風格指引
+			lengthGuide := map[string]string{
+				"short":  "回答控制在1-2句，簡短有力。",
+				"medium": "回答控制在2-3句，簡潔但有內容。",
+				"long":   "回答控制在4-5句，可以詳細展開。",
+			}
+			replyGuide := lengthGuide[scene.ReplyLength]
+			if replyGuide == "" {
+				replyGuide = lengthGuide["medium"]
+			}
+			if scene.ReplyLanguage != "" && scene.ReplyLanguage != scene.Language {
+				replyGuide += " 使用" + scene.ReplyLanguage + "回覆。"
+			}
+
+			personality.SystemPrompt = basePrompt + profileBlock + kbBlock + "\n\n【回覆規則】\n" + replyGuide + " 忽略亂碼和語音辨識雜訊。絕對不要說告別語。"
+		} else {
+			// 回退到舊的 ai_personalities 表
+			err = h.db.Get(&personality,
+				`SELECT system_prompt, llm_model, temperature, language
+				 FROM ai_personalities
+				 WHERE user_id = $1 AND is_default = TRUE AND deleted_at IS NULL
+				 LIMIT 1`,
+				userID,
+			)
+
+			if err != nil {
+				// 使用預設值
+				personality.SystemPrompt = "你是 AI 會議助手，替用戶參加視訊會議。規則：1)回答控制在100字以內，像真人對話一樣簡短自然 2)絕對不要說「再見」「下次見」「期待下次」等告別語 3)聽不懂就請對方再說一次 4)忽略亂碼和語音辨識雜訊 5)使用繁體中文"
+				personality.LLMModel = "claude-haiku-4-5-20251001"
+				personality.Temperature = 0.7
+				personality.Language = "zh-TW"
+			}
 		}
 
 		// 取得用戶的 voice_id 和 face_image_url（Mode 2/3 用）
@@ -332,6 +449,10 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					cancelFunc()
 				}
 				cancelMu.Unlock()
+				writeWSMessage(conn, WSMessage{
+					Type: "interrupt_ack",
+					Data: fiber.Map{"session_id": sessionID},
+				})
 				continue
 			}
 
@@ -482,7 +603,7 @@ func streamTTSToClient(ctx context.Context, conn *websocket.Conn, text, voiceGen
 	if err != nil {
 		log.Printf("串流 TTS 失敗: %v，回退非串流", err)
 		// 回退到非串流
-		url, ttsErr := callCosyVoiceTTS(text, voiceGender)
+		url, ttsErr := callCosyVoiceTTS(ctx, text, voiceGender)
 		if ttsErr == nil && url != "" {
 			writeWSMessage(conn, WSMessage{
 				Type: "tts_audio_chunk",
@@ -577,7 +698,7 @@ func streamTTSToClient(ctx context.Context, conn *websocket.Conn, text, voiceGen
 
 // callCosyVoiceTTS 呼叫 CosyVoice 串流語音合成（優先），回退到 Edge TTS
 // 使用串流端點：GPU 邊生成邊輸出 PCM → Gateway 收完存 WAV → 回傳 URL
-func callCosyVoiceTTS(text, voiceGender string) (string, error) {
+func callCosyVoiceTTS(ctx context.Context, text, voiceGender string) (string, error) {
 	// 優先用串流端點
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
@@ -585,29 +706,28 @@ func callCosyVoiceTTS(text, voiceGender string) (string, error) {
 		"voice_gender": voiceGender,
 	})
 
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/stream-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Post(
-		gpuInternalURL()+"/api/v1/tts/stream-synthesize",
-		"application/json",
-		bytes.NewBuffer(reqBody),
-	)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("CosyVoice 串流 TTS 失敗，回退非串流: %v", err)
-		return callCosyVoiceTTSSync(text, voiceGender)
+		return callCosyVoiceTTSSync(ctx, text, voiceGender)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("CosyVoice 串流 TTS 錯誤 (%d): %s，回退非串流", resp.StatusCode, string(body))
-		return callCosyVoiceTTSSync(text, voiceGender)
+		return callCosyVoiceTTSSync(ctx, text, voiceGender)
 	}
 
 	// 讀取串流 PCM 數據
 	pcmData, err := io.ReadAll(resp.Body)
 	if err != nil || len(pcmData) == 0 {
 		log.Printf("CosyVoice 串流 TTS 讀取失敗: %v", err)
-		return callCosyVoiceTTSSync(text, voiceGender)
+		return callCosyVoiceTTSSync(ctx, text, voiceGender)
 	}
 
 	// PCM → WAV 檔案（22050Hz 16bit mono）
@@ -618,7 +738,7 @@ func callCosyVoiceTTS(text, voiceGender string) (string, error) {
 	wavData := pcmToWAV(pcmData, 22050, 1, 16)
 	if err := os.WriteFile(wavPath, wavData, 0644); err != nil {
 		log.Printf("WAV 寫入失敗: %v", err)
-		return callCosyVoiceTTSSync(text, voiceGender)
+		return callCosyVoiceTTSSync(ctx, text, voiceGender)
 	}
 
 	return gpuPublicURL() + "/outputs/" + filename, nil
@@ -655,51 +775,49 @@ func pcmToWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 }
 
 // callCosyVoiceTTSSync 非串流 CosyVoice TTS（回退用）
-func callCosyVoiceTTSSync(text, voiceGender string) (string, error) {
+func callCosyVoiceTTSSync(ctx context.Context, text, voiceGender string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_id":     "default",
 		"voice_gender": voiceGender,
 	})
 
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Post(
-		gpuInternalURL()+"/api/v1/tts/synthesize",
-		"application/json",
-		bytes.NewBuffer(reqBody),
-	)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("CosyVoice TTS 失敗，回退 Edge TTS: %v", err)
-		return callEdgeTTS(text, voiceGender)
+		return callEdgeTTS(ctx, text, voiceGender)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("CosyVoice TTS 錯誤 (%d): %s，回退 Edge TTS", resp.StatusCode, string(body))
-		return callEdgeTTS(text, voiceGender)
+		return callEdgeTTS(ctx, text, voiceGender)
 	}
 
 	var gpuResp GPUResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
-		return callEdgeTTS(text, voiceGender)
+		return callEdgeTTS(ctx, text, voiceGender)
 	}
 	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
 // callEdgeTTS 呼叫 Edge TTS 快速語音合成（回退用）
-func callEdgeTTS(text, voiceGender string) (string, error) {
+func callEdgeTTS(ctx context.Context, text, voiceGender string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_gender": voiceGender,
 	})
 
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/fast-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Post(
-		gpuInternalURL()+"/api/v1/tts/fast-synthesize",
-		"application/json",
-		bytes.NewBuffer(reqBody),
-	)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -719,18 +837,17 @@ func callEdgeTTS(text, voiceGender string) (string, error) {
 }
 
 // callMeloTTS 呼叫 MeloTTS 記憶體內語音合成，回傳 base64 WAV（零 file I/O）
-func callMeloTTS(text, voiceGender string) (string, error) {
+func callMeloTTS(ctx context.Context, text, voiceGender string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
 		"voice_gender": voiceGender,
 	})
 
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/melo-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		gpuInternalURL()+"/api/v1/tts/melo-synthesize",
-		"application/json",
-		bytes.NewBuffer(reqBody),
-	)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -844,7 +961,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 			resp.Body.Close()
 		}
 		log.Printf("串流 LLM 失敗，回退非串流: %v", err)
-		h.processNonStreaming(conn, httpClient, msg, sessionID, userID,
+		h.processNonStreaming(ctx, conn, httpClient, msg, sessionID, userID,
 			systemPrompt, llmModel, temperature, language,
 			voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64)
 		return
@@ -945,10 +1062,10 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					}
 				} else {
 					// 預設聲音用 MeloTTS（記憶體內，回傳 base64）
-					b64, ttsErr := callMeloTTS(s, voiceGender)
+					b64, ttsErr := callMeloTTS(ctx, s, voiceGender)
 					if ttsErr != nil || b64 == "" {
 						log.Printf("MeloTTS 第 %d 句失敗: %v，回退 CosyVoice", i, ttsErr)
-						u, ttsErr := callCosyVoiceTTS(s, voiceGender)
+						u, ttsErr := callCosyVoiceTTS(ctx, s, voiceGender)
 						if ttsErr != nil || u == "" {
 							log.Printf("CosyVoice 也失敗: %v", ttsErr)
 							return
@@ -1012,6 +1129,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 // processNonStreaming 非串流模式（回退用）
 func (h *WebSocketHandler) processNonStreaming(
+	ctx context.Context,
 	conn *websocket.Conn,
 	httpClient *http.Client,
 	msg TranscriptionMessage,
@@ -1071,10 +1189,10 @@ func (h *WebSocketHandler) processNonStreaming(
 			}
 		} else {
 			// 預設聲音：MeloTTS（記憶體內 base64），失敗回退 CosyVoice
-			b64, meloErr := callMeloTTS(aiResponse.Text, voiceGender)
+			b64, meloErr := callMeloTTS(ctx, aiResponse.Text, voiceGender)
 			if meloErr != nil || b64 == "" {
 				log.Printf("MeloTTS 失敗: %v，回退 CosyVoice", meloErr)
-				audioURL, ttsErr = callCosyVoiceTTS(aiResponse.Text, voiceGender)
+				audioURL, ttsErr = callCosyVoiceTTS(ctx, aiResponse.Text, voiceGender)
 			} else {
 				// MeloTTS 成功，直接送 base64
 				writeWSMessage(conn, WSMessage{

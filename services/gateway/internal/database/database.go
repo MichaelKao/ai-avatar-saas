@@ -121,6 +121,72 @@ func Migrate(db *sqlx.DB) error {
 			used BOOLEAN DEFAULT FALSE,
 			created_at TIMESTAMP DEFAULT NOW()
 		)`,
+		// 場景表（SaaS 多用戶個人化）
+		`CREATE TABLE IF NOT EXISTS scenes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			scene_type VARCHAR(50) NOT NULL DEFAULT 'custom',
+			language VARCHAR(50) DEFAULT 'zh-TW',
+			reply_language VARCHAR(50) DEFAULT 'zh-TW',
+			reply_length VARCHAR(20) DEFAULT 'medium',
+			personality VARCHAR(50) DEFAULT 'professional',
+			formality INTEGER DEFAULT 3,
+			custom_system_prompt TEXT,
+			llm_model VARCHAR(100) DEFAULT 'claude-sonnet-4-6',
+			temperature DECIMAL(3,2) DEFAULT 0.7,
+			transition_enabled BOOLEAN DEFAULT TRUE,
+			transition_style VARCHAR(50) DEFAULT 'natural',
+			is_default BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+		// 知識庫表（RAG）
+		`CREATE TABLE IF NOT EXISTS knowledge_bases (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scene_id UUID REFERENCES scenes(id) ON DELETE CASCADE,
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			title VARCHAR(500) NOT NULL,
+			content TEXT NOT NULL,
+			content_type VARCHAR(50) DEFAULT 'text',
+			file_url VARCHAR(500),
+			token_count INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+		// 用戶場景背景資料表
+		`CREATE TABLE IF NOT EXISTS user_profiles (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scene_id UUID REFERENCES scenes(id) ON DELETE CASCADE,
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			display_name VARCHAR(255),
+			title VARCHAR(255),
+			company VARCHAR(255),
+			experience_years INTEGER DEFAULT 0,
+			skills TEXT,
+			experiences TEXT,
+			custom_phrases TEXT,
+			additional_context TEXT,
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+		// 過渡語表（預快取音訊）
+		`CREATE TABLE IF NOT EXISTS transition_phrases (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			language VARCHAR(50) NOT NULL DEFAULT 'zh-TW',
+			style VARCHAR(50) NOT NULL DEFAULT 'natural',
+			phrase TEXT NOT NULL,
+			audio_url VARCHAR(500),
+			audio_base64 TEXT,
+			duration_ms INTEGER,
+			voice_gender VARCHAR(10) DEFAULT 'female',
+			is_cached BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMP DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
 		// 索引
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)`,
@@ -131,6 +197,13 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token)`,
+		`CREATE INDEX IF NOT EXISTS idx_scenes_user_id ON scenes(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scenes_scene_type ON scenes(scene_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scene_id ON knowledge_bases(scene_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user_id ON knowledge_bases(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_profiles_scene_id ON user_profiles(scene_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transition_phrases_lang_style ON transition_phrases(language, style)`,
 	}
 
 	for _, stmt := range statements {
