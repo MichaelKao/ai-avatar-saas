@@ -32,7 +32,11 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))
 for d in [MODEL_DIR, UPLOAD_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# 全域模型變數（Whisper 由 stt_service.py 載入，不在此重複載入）
+# Whisper STT 設定
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+
+# 全域模型變數
+whisper_model = None
 cosyvoice_model = None
 wav2lip_model = None
 musetalk_model = None
@@ -43,7 +47,7 @@ melotts_speaker_ids = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """啟動時載入模型"""
-    global cosyvoice_model, wav2lip_model, musetalk_model
+    global whisper_model, cosyvoice_model, wav2lip_model, musetalk_model
 
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "No GPU")
@@ -85,7 +89,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"MeloTTS 載入失敗: {e}")
 
-    # Whisper STT 由 stt_service.py 載入，不在此重複載入（省 ~3GB VRAM）
+    # 載入 Whisper STT 模型
+    try:
+        from faster_whisper import WhisperModel
+        compute = "int8_float16" if WHISPER_MODEL_SIZE == "large-v3" else "float16"
+        logger.info(f"Loading Whisper {WHISPER_MODEL_SIZE} (compute={compute})...")
+        whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type=compute)
+        logger.info(f"Whisper {WHISPER_MODEL_SIZE} 載入完成")
+    except Exception as e:
+        logger.warning(f"Whisper 載入失敗: {e}")
 
     yield
     logger.info("GPU Service 關閉")
