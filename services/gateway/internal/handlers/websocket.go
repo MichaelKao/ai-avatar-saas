@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -717,7 +718,7 @@ func callEdgeTTS(text, voiceGender string) (string, error) {
 	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
-// callMeloTTS 呼叫 MeloTTS 超低延遲語音合成（~120ms，即時對話用）
+// callMeloTTS 呼叫 MeloTTS 記憶體內語音合成，回傳 base64 WAV（零 file I/O）
 func callMeloTTS(text, voiceGender string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]string{
 		"text":         text,
@@ -740,12 +741,13 @@ func callMeloTTS(text, voiceGender string) (string, error) {
 		return "", fmt.Errorf("MeloTTS 錯誤 (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var gpuResp GPUResponse
-	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
-		return "", fmt.Errorf("解析 MeloTTS 回應失敗: %w", err)
+	// 讀取 WAV 二進位，編碼為 base64
+	wavBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("讀取 MeloTTS 回應失敗: %w", err)
 	}
 
-	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
+	return base64.StdEncoding.EncodeToString(wavBytes), nil
 }
 
 // callWav2LipFromAudio 用既有音訊 + 臉部圖片產生 Wav2Lip 臉部動畫
@@ -914,52 +916,53 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				default:
 				}
 
-				var audioURL string
 				if useCustomVoice {
-					// 自訂聲音用 CosyVoice
+					// 自訂聲音用 CosyVoice（回傳 URL）
 					u, ttsErr := callGPUTTS(s, voiceID, voiceGender)
 					if ttsErr != nil || u == "" {
 						log.Printf("TTS 第 %d 句失敗: %v", i, ttsErr)
 						return
 					}
-					audioURL = u
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
+					})
+					// Mode 3: 自訂聲音才觸發 Wav2Lip
+					if msg.Mode == 3 {
+						go func(aURL, fURL, fBase64, sid string) {
+							vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
+							if wErr != nil {
+								log.Printf("唇形動畫失敗: %v", wErr)
+								return
+							}
+							if vURL != "" {
+								writeWSMessage(conn, WSMessage{
+									Type: "avatar_video",
+									Data: fiber.Map{"video_url": vURL, "session_id": sid},
+								})
+							}
+						}(u, faceImageURL, sessionFaceBase64, sessionID)
+					}
 				} else {
-					// 預設聲音用 MeloTTS（~120ms，比 CosyVoice 快 6 倍）
-					u, ttsErr := callMeloTTS(s, voiceGender)
-					if ttsErr != nil || u == "" {
+					// 預設聲音用 MeloTTS（記憶體內，回傳 base64）
+					b64, ttsErr := callMeloTTS(s, voiceGender)
+					if ttsErr != nil || b64 == "" {
 						log.Printf("MeloTTS 第 %d 句失敗: %v，回退 CosyVoice", i, ttsErr)
-						// 回退到 CosyVoice
-						u, ttsErr = callCosyVoiceTTS(s, voiceGender)
+						u, ttsErr := callCosyVoiceTTS(s, voiceGender)
 						if ttsErr != nil || u == "" {
 							log.Printf("CosyVoice 也失敗: %v", ttsErr)
 							return
 						}
+						writeWSMessage(conn, WSMessage{
+							Type: "tts_audio_chunk",
+							Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
+						})
+					} else {
+						writeWSMessage(conn, WSMessage{
+							Type: "tts_audio_chunk",
+							Data: fiber.Map{"audio_base64": b64, "index": i, "session_id": sessionID},
+						})
 					}
-					audioURL = u
-				}
-				writeWSMessage(conn, WSMessage{
-					Type: "tts_audio_chunk",
-					Data: fiber.Map{"audio_url": audioURL, "index": i, "session_id": sessionID},
-				})
-
-				// Mode 3: 自訂聲音才觸發 Wav2Lip（串流模式暫不支援）
-				if msg.Mode == 3 && audioURL != "" {
-					go func(aURL, fURL, fBase64, sid string) {
-						vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
-						if wErr != nil {
-							log.Printf("唇形動畫失敗: %v", wErr)
-							return
-						}
-						if vURL != "" {
-							writeWSMessage(conn, WSMessage{
-								Type: "avatar_video",
-								Data: fiber.Map{
-									"video_url":  vURL,
-									"session_id": sid,
-								},
-							})
-						}
-					}(audioURL, faceImageURL, sessionFaceBase64, sessionID)
 				}
 			}(sentence, idx)
 		}
@@ -1067,26 +1070,18 @@ func (h *WebSocketHandler) processNonStreaming(
 				audioURL, ttsErr = callGPUTTS(aiResponse.Text, voiceID, voiceGender)
 			}
 		} else {
-			// 預設聲音：MeloTTS（~120ms），失敗回退 CosyVoice
-			audioURL, ttsErr = callMeloTTS(aiResponse.Text, voiceGender)
-			if ttsErr != nil {
-				log.Printf("MeloTTS 失敗: %v，回退 CosyVoice", ttsErr)
+			// 預設聲音：MeloTTS（記憶體內 base64），失敗回退 CosyVoice
+			b64, meloErr := callMeloTTS(aiResponse.Text, voiceGender)
+			if meloErr != nil || b64 == "" {
+				log.Printf("MeloTTS 失敗: %v，回退 CosyVoice", meloErr)
 				audioURL, ttsErr = callCosyVoiceTTS(aiResponse.Text, voiceGender)
-			}
-			if ttsErr == nil && audioURL != "" && msg.Mode == 3 {
-				go func(aURL, fURL, fBase64, sid string) {
-					vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
-					if wErr != nil {
-						log.Printf("Wav2Lip 背景失敗: %v", wErr)
-						return
-					}
-					if vURL != "" {
-						writeWSMessage(conn, WSMessage{
-							Type: "avatar_video",
-							Data: fiber.Map{"video_url": vURL, "session_id": sid},
-						})
-					}
-				}(audioURL, faceImageURL, sessionFaceBase64, sessionID)
+			} else {
+				// MeloTTS 成功，直接送 base64
+				writeWSMessage(conn, WSMessage{
+					Type: "tts_audio",
+					Data: fiber.Map{"audio_base64": b64, "session_id": sessionID},
+				})
+				// Mode 3 唇形動畫暫不支援 base64，跳過
 			}
 		}
 

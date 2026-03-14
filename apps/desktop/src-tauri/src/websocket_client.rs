@@ -63,9 +63,18 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
                         let msg_type = json["type"].as_str().unwrap_or("");
 
                         match msg_type {
-                            "tts_audio_chunk" => {
-                                // 串流 TTS chunk：直接在 Rust 層下載並入隊播放
-                                if let Some(audio_url) = json["data"]["audio_url"].as_str() {
+                            "tts_audio_chunk" | "tts_audio" => {
+                                // 串流 TTS chunk：支援 base64（記憶體內）或 URL（下載）
+                                if let Some(b64) = json["data"]["audio_base64"].as_str() {
+                                    // base64 模式：直接解碼，不需下載（省 ~250ms）
+                                    let b64 = b64.to_string();
+                                    tokio::spawn(async move {
+                                        match decode_and_enqueue(&b64) {
+                                            Ok(_) => {}
+                                            Err(e) => eprintln!("base64 音訊入隊失敗: {}", e),
+                                        }
+                                    });
+                                } else if let Some(audio_url) = json["data"]["audio_url"].as_str() {
                                     let url = audio_url.to_string();
                                     tokio::spawn(async move {
                                         match download_and_enqueue(&url).await {
@@ -113,6 +122,15 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
     });
 
     Ok(())
+}
+
+/// 解碼 base64 音訊並加入串流播放佇列（零網路延遲）
+fn decode_and_enqueue(b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    let wav_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 解碼失敗: {}", e))?;
+    audio_player::enqueue_audio_chunk(&wav_bytes)
 }
 
 /// 下載音訊並加入串流播放佇列

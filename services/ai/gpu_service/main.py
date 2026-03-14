@@ -259,23 +259,29 @@ async def stream_synthesize_speech(request: StreamTTSRequest):
 
 @app.post("/api/v1/tts/melo-synthesize")
 async def melo_synthesize_speech(request: StreamTTSRequest):
-    """MeloTTS 超低延遲語音合成 — ~120ms，適合即時對話
-    回傳 JSON { data: { audio_url } }，與其他 TTS 端點格式一致
+    """MeloTTS 超低延遲語音合成 — 記憶體內生成，零 file I/O
+    回傳 WAV 二進位流（不寫檔），Gateway 直接讀取 bytes
     """
     if melotts_model is None:
         raise HTTPException(503, "MeloTTS 未載入")
 
     try:
         import asyncio
-        filename = f"melo_{uuid.uuid4().hex[:8]}.wav"
-        output_path = str(OUTPUT_DIR / filename)
+        import io
+        import soundfile as sf
         speaker_id = melotts_speaker_ids["ZH"]
-        # 在 executor 中執行同步 TTS，避免阻塞 event loop
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, melotts_model.tts_to_file, request.text, speaker_id, output_path, 1.0
+        # output_path=None → 回傳 numpy array，不寫檔
+        audio_np = await loop.run_in_executor(
+            None, lambda: melotts_model.tts_to_file(
+                request.text, speaker_id, output_path=None, speed=1.0, quiet=True
+            )
         )
-        return {"data": {"audio_url": f"/outputs/{filename}"}, "error": None}
+        # numpy → WAV bytes（記憶體內）
+        buf = io.BytesIO()
+        sf.write(buf, audio_np, melotts_model.hps.data.sampling_rate, format="WAV")
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="audio/wav")
     except Exception as e:
         logger.error(f"MeloTTS 合成失敗: {e}")
         raise HTTPException(500, f"MeloTTS 合成失敗: {str(e)}")

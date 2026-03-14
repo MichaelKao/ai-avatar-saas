@@ -13,6 +13,8 @@ SENTENCE_SEPARATORS = ["。", "？", "！", ".", "?", "!"]
 CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";", "：", ":"]
 # 最小 chunk 長度（2 字元即切，讓首句盡快送出 TTS）
 MIN_CHUNK_LEN = 2
+# 最大 chunk 長度（超過就強制切斷，不等標點）
+MAX_CHUNK_LEN = 5
 
 
 class ClaudeHandler:
@@ -94,6 +96,7 @@ def _find_cut_position(buffer: str) -> int | None:
     """找到最佳切段位置 — 越早切越好，讓 TTS 盡快開始
     1. 句子分隔符（。？！.?!）→ 任何長度都切
     2. 逗號級分隔符（，、；,;：:）→ 至少 MIN_CHUNK_LEN 字元才切
+    3. 超過 MAX_CHUNK_LEN → 強制切斷，不等標點
     """
     # 合併所有分隔符一起找最早的切點
     earliest = None
@@ -117,6 +120,11 @@ def _find_cut_position(buffer: str) -> int | None:
                 if cut >= MIN_CHUNK_LEN:
                     if earliest is None or cut < earliest:
                         earliest = cut
-        return earliest
+        if earliest is not None:
+            return earliest
+
+    # 超過 MAX_CHUNK_LEN 強制切斷（不等任何標點）
+    if len(buffer) >= MAX_CHUNK_LEN:
+        return MAX_CHUNK_LEN
 
     return None
