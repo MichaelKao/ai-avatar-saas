@@ -67,11 +67,12 @@ class MuseTalkHandler:
             )
 
             # 載入 Whisper（音訊特徵提取用）
-            self.whisper = WhisperModel.from_pretrained("models/whisper").to("cuda").half()
+            whisper_path = str(musetalk_path / "models" / "whisper")
+            self.whisper = WhisperModel.from_pretrained(whisper_path).to("cuda").half()
             self.whisper.eval()
 
             # 載入音訊處理器
-            self.audio_processor = AudioProcessor(feature_extractor_path="models/whisper")
+            self.audio_processor = AudioProcessor(feature_extractor_path=whisper_path)
 
             # Face parsing（混合用）
             from musetalk.utils.face_parsing import FaceParsing
