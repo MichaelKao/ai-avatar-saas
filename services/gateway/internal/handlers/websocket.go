@@ -1521,13 +1521,19 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
 			} else {
-				// Edge TTS 為主要 TTS（穩定、清晰、免費）
+				// MeloTTS 為主要 TTS（~309ms 快速、中文清晰穩定）
 				// CosyVoice 語音品質不穩定，暫停使用
-				ttsEngine = "edge-tts"
-				b64, ttsErr := callEdgeTTSBase64(ctx, sent.text, voiceGender)
+				ttsEngine = "melotts"
+				b64, ttsErr := callMeloTTS(ctx, sent.text, voiceGender)
 				if ttsErr != nil || b64 == "" {
-					log.Printf("Edge TTS #%d 失敗: %v", sent.index, ttsErr)
-					continue
+					log.Printf("MeloTTS #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
+					// 回退 Edge TTS
+					ttsEngine = "edge-tts"
+					b64, ttsErr = callEdgeTTSBase64(ctx, sent.text, voiceGender)
+					if ttsErr != nil || b64 == "" {
+						log.Printf("Edge TTS #%d 也失敗: %v", sent.index, ttsErr)
+						continue
+					}
 				}
 				audioB64 = b64
 				safeWriteWSMessage(conn, &wsMu, WSMessage{
