@@ -62,7 +62,7 @@ fn main() {
         ])
         .setup(|_app| {
             // 啟動 MuseTalk 幀 HTTP 伺服器（給 OBS Browser Source 用）
-            tokio::spawn(frame_server::start(19280));
+            tauri::async_runtime::spawn(frame_server::start(19280));
             Ok(())
         })
         .run(tauri::generate_context!())
