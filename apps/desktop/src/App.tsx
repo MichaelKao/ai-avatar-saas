@@ -83,15 +83,13 @@ function AvatarWindow() {
   const playbackTimerRef = useRef<number | null>(null);
   const [showAvatar, setShowAvatar] = useState(false);
   const [faceSnapshot, setFaceSnapshot] = useState('');
-  const [hasFrame, setHasFrame] = useState(false);
 
-  // 25 FPS 幀播放器 — 從佇列取幀，直接更新 DOM（跳過 React 渲染）
-  const startFramePlayback = useCallback(() => {
-    if (playbackTimerRef.current) return; // 已在播放
+  // 啟動 25 FPS 幀播放器（純 ref 操作，不觸發 React re-render）
+  const startFramePlayback = useRef(() => {
+    if (playbackTimerRef.current) return;
     playbackTimerRef.current = window.setInterval(() => {
       const queue = frameQueueRef.current;
       if (queue.length === 0) {
-        // 佇列空了，停止計時器
         if (playbackTimerRef.current) {
           clearInterval(playbackTimerRef.current);
           playbackTimerRef.current = null;
@@ -103,9 +101,8 @@ function AvatarWindow() {
         frameImgRef.current.src = `data:image/jpeg;base64,${frame}`;
         frameImgRef.current.style.display = 'block';
       }
-      if (!hasFrame) setHasFrame(true);
-    }, 40); // 40ms = 25 FPS
-  }, [hasFrame]);
+    }, 40);
+  }).current;
 
   // 接收臉部截圖（webcam 不可用時的備用畫面）
   useEffect(() => {
@@ -130,7 +127,8 @@ function AvatarWindow() {
         playbackTimerRef.current = null;
       }
     };
-  }, [startFramePlayback]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 新回答開始時清空舊幀佇列
   useEffect(() => {
@@ -190,7 +188,7 @@ function AvatarWindow() {
           alt=""
         />
       )}
-      {/* MuseTalk 即時唇形幀 — 直接 DOM 操作，跳過 React 渲染瓶頸 */}
+      {/* MuseTalk 即時唇形幀 — 直接 DOM 操作，不經 React 狀態 */}
       <img
         ref={frameImgRef}
         style={{ ...fullCover, zIndex: 5, display: 'none' }}
@@ -205,8 +203,8 @@ function AvatarWindow() {
         onError={handleAvatarEnded}
       />
       {/* 無任何畫面時顯示提示 */}
-      {!faceSnapshot && !hasFrame && (
-        <div style={{
+      {!faceSnapshot && (
+        <div id="avatar-loading" style={{
           ...fullCover, display: 'flex', alignItems: 'center', justifyContent: 'center',
           color: '#475569', fontSize: 14, textAlign: 'center',
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',

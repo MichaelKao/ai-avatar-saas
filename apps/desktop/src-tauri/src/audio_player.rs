@@ -179,15 +179,24 @@ fn playback_loop(
         let (chunk_sample_rate, samples) = match chunk {
             Some(s) => s,
             None => {
-                // 佇列空了，等一下看有沒有新的
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                // 再檢查一次
-                let still_empty = {
-                    let q = queue.lock().map_err(|e| format!("鎖定失敗: {}", e))?;
-                    q.is_empty()
-                };
-                if still_empty {
-                    // 確實沒有了，結束播放
+                // 佇列空了，等最多 5 秒看有沒有新 chunk（TTS 生成需要時間）
+                let mut found = false;
+                for _ in 0..25 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let has_data = {
+                        let q = queue.lock().map_err(|e| format!("鎖定失敗: {}", e))?;
+                        !q.is_empty()
+                    };
+                    if has_data {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    // 5 秒內沒有新 chunk，結束播放
                     break;
                 }
                 continue;
