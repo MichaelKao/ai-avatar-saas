@@ -41,7 +41,7 @@ export default function Home() {
             開始使用 — 免費
           </Link>
           <a
-            href="https://github.com/MichaelKao/ai-avatar-saas/releases/download/v0.5.0/AI.Avatar.Desktop_0.5.0_x64-setup.exe"
+            href="https://github.com/MichaelKao/ai-avatar-saas/releases/download/v0.8.1/AI.Avatar.Desktop_0.8.1_x64-setup.exe"
             className="inline-flex items-center gap-2 px-8 py-4 bg-gray-900 text-white text-lg rounded-xl hover:bg-gray-800 font-medium shadow-lg"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
