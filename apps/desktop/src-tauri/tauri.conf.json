@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/json-schema/refs/tags/main/schema/tauri-v2.json",
   "productName": "AI Avatar Desktop",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "identifier": "com.aiavatar.desktop",
   "build": {
     "frontendDist": "../dist",
