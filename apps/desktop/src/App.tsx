@@ -81,6 +81,8 @@ function AvatarWindow() {
   const frameImgRef = useRef<HTMLImageElement | null>(null);
   const frameQueueRef = useRef<string[]>([]);
   const playbackTimerRef = useRef<number | null>(null);
+  const frameCountRef = useRef(0);
+  const counterRef = useRef<HTMLDivElement | null>(null);
   const [showAvatar, setShowAvatar] = useState(false);
   const [faceSnapshot, setFaceSnapshot] = useState('');
 
@@ -97,9 +99,14 @@ function AvatarWindow() {
         return;
       }
       const frame = queue.shift()!;
+      frameCountRef.current++;
       if (frameImgRef.current) {
         frameImgRef.current.src = `data:image/jpeg;base64,${frame}`;
         frameImgRef.current.style.display = 'block';
+      }
+      // 除錯計數器
+      if (counterRef.current) {
+        counterRef.current.textContent = `幀: ${frameCountRef.current} | 佇列: ${queue.length}`;
       }
     }, 40);
   }).current;
@@ -114,10 +121,16 @@ function AvatarWindow() {
 
   // 接收 MuseTalk 即時唇形幀 — 加入佇列，啟動播放器
   useEffect(() => {
+    let receivedCount = 0;
     const unlisten = listen<string>('avatar-frame-update', (event) => {
       if (event.payload) {
+        receivedCount++;
         frameQueueRef.current.push(event.payload);
         startFramePlayback();
+        // 除錯：顯示收到幀數
+        if (counterRef.current) {
+          counterRef.current.textContent = `收到: ${receivedCount} | 佇列: ${frameQueueRef.current.length}`;
+        }
       }
     });
     return () => {
@@ -202,6 +215,17 @@ function AvatarWindow() {
         onEnded={handleAvatarEnded}
         onError={handleAvatarEnded}
       />
+      {/* 除錯幀計數器 */}
+      <div
+        ref={counterRef}
+        style={{
+          position: 'absolute', bottom: 4, left: 4, zIndex: 20,
+          color: '#0f0', fontSize: 12, fontFamily: 'monospace',
+          background: 'rgba(0,0,0,0.6)', padding: '2px 6px', borderRadius: 4,
+        }}
+      >
+        等待幀...
+      </div>
       {/* 無任何畫面時顯示提示 */}
       {!faceSnapshot && (
         <div id="avatar-loading" style={{

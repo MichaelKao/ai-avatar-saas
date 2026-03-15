@@ -9,6 +9,7 @@ mod obs_virtual_cam;
 mod obs_manager;
 mod vad;
 mod audio_player;
+mod frame_server;
 
 fn main() {
     tauri::Builder::default()
@@ -59,6 +60,11 @@ fn main() {
             // 健康檢查
             api_check_health,
         ])
+        .setup(|_app| {
+            // 啟動 MuseTalk 幀 HTTP 伺服器（給 OBS Browser Source 用）
+            tokio::spawn(frame_server::start(19280));
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("啟動失敗");
 }
@@ -782,6 +788,8 @@ async fn set_custom_prompt(prompt: String) -> Result<(), String> {
 #[tauri::command]
 async fn emit_avatar_face(app: tauri::AppHandle, face_base64: String) -> Result<(), String> {
     use tauri::Emitter;
+    // 寫入 frame server（OBS Browser Source 初始畫面）
+    frame_server::update_frame_base64(&face_base64).await;
     app.emit_to("avatar", "avatar-face-snapshot", &face_base64)
         .map_err(|e| format!("發送失敗: {}", e))?;
     Ok(())

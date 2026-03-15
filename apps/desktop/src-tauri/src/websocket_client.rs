@@ -154,8 +154,11 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
                                 app_clone.emit("ws-message", text.as_str()).ok();
                             }
                             "avatar_frame" => {
-                                // MuseTalk 唇形幀 — 直接發送到 AvatarWindow（不經 React 繞路）
+                                // MuseTalk 唇形幀 — 更新 frame server（OBS Browser Source 用）+ Tauri 事件
                                 if let Some(frame) = json["data"]["frame"].as_str() {
+                                    // 寫入本地 HTTP 伺服器（OBS Browser Source 會即時拉取）
+                                    crate::frame_server::update_frame_base64(frame).await;
+                                    // 也發送 Tauri 事件給 AvatarWindow
                                     use tauri::Emitter;
                                     app_clone.emit("avatar-frame-update", frame).ok();
                                 }

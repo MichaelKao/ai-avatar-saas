@@ -164,23 +164,21 @@ pub async fn setup_virtual_camera(
         .request("RemoveInput", json!({ "inputName": source_name }))
         .await;
 
-    // 4. 建立視窗擷取來源
-    // OBS 視窗匹配格式：「標題:視窗類別:執行檔名稱」
-    let window_match = format!(
-        "{}:Chrome_WidgetWin_1:ai-avatar-desktop.exe",
-        avatar_window_title
-    );
-
+    // 4. 建立 Browser Source（連到本地 frame server，比 window_capture 更可靠）
+    // frame server 在 http://127.0.0.1:19280 提供 MuseTalk 幀
     conn.request(
         "CreateInput",
         json!({
             "sceneName": scene_name,
             "inputName": source_name,
-            "inputKind": "window_capture",
+            "inputKind": "browser_source",
             "inputSettings": {
-                "window": window_match,
-                "capture_method": "auto",
-                "client_area": true
+                "url": "http://127.0.0.1:19280",
+                "width": 640,
+                "height": 480,
+                "css": "",
+                "shutdown": false,
+                "restart_when_active": false
             }
         }),
     )

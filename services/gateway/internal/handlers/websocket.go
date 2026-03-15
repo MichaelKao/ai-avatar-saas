@@ -1458,54 +1458,28 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
 			} else {
-				// CosyVoice 男聲品質差（嗯嗯啊阿聽不清），男聲改用 Edge TTS（台灣腔，清晰）
-				// CosyVoice 女聲品質好，繼續使用
-				if voiceGender == "male" {
-					// 男聲：Edge TTS（清晰台灣腔）
-					u, ttsErr := callEdgeTTS(ctx, sent.text, voiceGender)
-					if ttsErr != nil || u == "" {
-						log.Printf("Edge TTS #%d 失敗: %v，回退 CosyVoice", sent.index, ttsErr)
-						b64, e2 := callCosyVoiceStreamBase64(ctx, sent.text, voiceGender)
-						if e2 != nil || b64 == "" {
-							log.Printf("CosyVoice #%d 也失敗: %v", sent.index, e2)
-							continue
-						}
-						audioB64 = b64
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-						})
-					} else {
-						ttsEngine = "edge-tts"
-						audioURL = u
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-						})
+				// 強制用 CosyVoice 女聲（男聲品質差暫時停用）
+				// 不管 voiceGender 設什麼，一律用 female 產生語音
+				b64, ttsErr := callCosyVoiceStreamBase64(ctx, sent.text, "female")
+				if ttsErr != nil || b64 == "" {
+					log.Printf("CosyVoice #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
+					u, e2 := callEdgeTTS(ctx, sent.text, "female")
+					if e2 != nil || u == "" {
+						log.Printf("Edge TTS #%d 也失敗: %v", sent.index, e2)
+						continue
 					}
+					ttsEngine = "edge-tts"
+					audioURL = u
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
+					})
 				} else {
-					// 女聲：CosyVoice（品質好、速度快）
-					b64, ttsErr := callCosyVoiceStreamBase64(ctx, sent.text, voiceGender)
-					if ttsErr != nil || b64 == "" {
-						log.Printf("CosyVoice #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
-						u, e2 := callEdgeTTS(ctx, sent.text, voiceGender)
-						if e2 != nil || u == "" {
-							log.Printf("Edge TTS #%d 也失敗: %v", sent.index, e2)
-							continue
-						}
-						ttsEngine = "edge-tts"
-						audioURL = u
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-						})
-					} else {
-						audioB64 = b64
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-						})
-					}
+					audioB64 = b64
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
+					})
 				}
 			}
 
