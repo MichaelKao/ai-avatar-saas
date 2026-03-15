@@ -712,6 +712,18 @@ function MainApp() {
         } else if (msg.type === 'tts_stream_end') {
           const total = msg.data?.total_chunks ?? 0;
           addLog('ai-audio', `語音串流完成 (${total} 段)`);
+        } else if (msg.type === 'avatar_frame') {
+          // MuseTalk 即時唇形動畫幀（base64 JPEG）
+          const frame = msg.data?.frame || '';
+          const frameIndex = msg.data?.index ?? 0;
+          const totalFrames = msg.data?.total ?? 0;
+          if (frame && frameIndex === 0) {
+            addLog('ai-video', `MuseTalk 唇形動畫: ${totalFrames} 幀`);
+          }
+          if (frame) {
+            setAvatarVideoUrl(`data:image/jpeg;base64,${frame}`);
+            invoke('emit_avatar_frame', { frame }).catch(() => {});
+          }
         } else if (msg.type === 'avatar_video') {
           const videoUrl = msg.data?.video_url || '';
           addLog('ai-video', `臉部動畫: ${videoUrl || '(空URL)'}`);

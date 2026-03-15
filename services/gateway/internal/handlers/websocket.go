@@ -392,6 +392,9 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 
 		// 每個連線記住 face_image_base64（只需傳送一次）
 		var sessionFaceBase64 string
+		// MuseTalk 臉部預處理狀態
+		var museTalkFaceID string
+		var museTalkReady bool
 
 		// 場景過渡語設定
 		var transitionEnabled bool
@@ -484,6 +487,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					ctx, conn, httpClient, latest, sessionID, userID, activeSceneID,
 					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
+					museTalkReady, museTalkFaceID,
 				)
 
 				// Pipeline 完成，清除 cancel
@@ -533,6 +537,18 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			// 儲存 face_image_base64（第一次傳送後記住，後續訊息不需再傳）
 			if msg.FaceImageBase64 != "" {
 				sessionFaceBase64 = msg.FaceImageBase64
+				// MuseTalk: 預處理臉部（一次性，~2秒）
+				if !museTalkReady {
+					museTalkFaceID = sessionID
+					go func(fid, fb64 string) {
+						if err := callMuseTalkPrepareFace(fid, fb64); err != nil {
+							log.Printf("MuseTalk prepare-face 失敗（將回退 Wav2Lip）: %v", err)
+						} else {
+							museTalkReady = true
+							log.Printf("MuseTalk 臉部預處理完成: %s", fid)
+						}
+					}(museTalkFaceID, msg.FaceImageBase64)
+				}
 			}
 
 			// 忽略空訊息
@@ -985,6 +1001,135 @@ func callWav2LipFromAudio(audioURL, faceImageURL, faceImageBase64 string) (strin
 	return "", nil
 }
 
+// ============== MuseTalk 即時唇形動畫 ==============
+
+// callMuseTalkPrepareFace 預處理臉部特徵（Session 開始時呼叫一次）
+func callMuseTalkPrepareFace(faceID, faceImageBase64 string) error {
+	internalURL := gpuInternalURL()
+	payload := map[string]string{
+		"face_id":            faceID,
+		"face_image_base64": faceImageBase64,
+	}
+	reqBody, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(
+		internalURL+"/api/v1/avatar/prepare-face",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare-face 請求失敗: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("prepare-face 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+	log.Printf("MuseTalk prepare-face 完成: %s", faceID)
+	return nil
+}
+
+// MuseTalkLipsyncResponse MuseTalk 唇形動畫回應
+type MuseTalkLipsyncResponse struct {
+	Data struct {
+		FrameCount int      `json:"frame_count"`
+		Frames     []string `json:"frames"` // base64 JPEG
+		FPS        int      `json:"fps"`
+	} `json:"data"`
+	Error interface{} `json:"error"`
+}
+
+// callMuseTalkLipsync 生成唇形動畫幀（從音訊 URL）
+func callMuseTalkLipsync(faceID, audioURL string) ([]string, error) {
+	internalURL := gpuInternalURL()
+	pubURL := gpuPublicURL()
+
+	// 先下載音訊為 bytes，再以 base64 傳給 MuseTalk
+	downloadURL := audioURL
+	if strings.HasPrefix(audioURL, pubURL) {
+		downloadURL = internalURL + audioURL[len(pubURL):]
+	} else if !strings.HasPrefix(audioURL, "http") {
+		downloadURL = internalURL + audioURL
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	audioResp, err := client.Get(downloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("下載音訊失敗: %w", err)
+	}
+	defer audioResp.Body.Close()
+	audioBytes, _ := io.ReadAll(audioResp.Body)
+
+	audioBase64 := base64.StdEncoding.EncodeToString(audioBytes)
+
+	payload := map[string]interface{}{
+		"face_id":      faceID,
+		"audio_base64": audioBase64,
+		"sample_rate":  22050,
+	}
+	reqBody, _ := json.Marshal(payload)
+
+	lipsyncClient := &http.Client{Timeout: 60 * time.Second}
+	resp, err := lipsyncClient.Post(
+		internalURL+"/api/v1/avatar/musetalk-lipsync",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("musetalk-lipsync 請求失敗: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("musetalk-lipsync 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var mtResp MuseTalkLipsyncResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mtResp); err != nil {
+		return nil, fmt.Errorf("解析 MuseTalk 回應失敗: %w", err)
+	}
+
+	return mtResp.Data.Frames, nil
+}
+
+// callMuseTalkLipsyncFromBase64 從 base64 音訊生成唇形動畫幀
+func callMuseTalkLipsyncFromBase64(faceID, audioBase64 string, sampleRate int) ([]string, error) {
+	internalURL := gpuInternalURL()
+
+	payload := map[string]interface{}{
+		"face_id":      faceID,
+		"audio_base64": audioBase64,
+		"sample_rate":  sampleRate,
+	}
+	reqBody, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Post(
+		internalURL+"/api/v1/avatar/musetalk-lipsync",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("musetalk-lipsync 請求失敗: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("musetalk-lipsync 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var mtResp MuseTalkLipsyncResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mtResp); err != nil {
+		return nil, fmt.Errorf("解析 MuseTalk 回應失敗: %w", err)
+	}
+
+	return mtResp.Data.Frames, nil
+}
+
 // ttsResult 句子級 TTS 結果
 type ttsResult struct {
 	audioURL string
@@ -1102,6 +1247,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	voiceGender, voiceID string,
 	useCustomVoice bool,
 	faceImageURL, sessionFaceBase64 string,
+	museTalkReady bool, museTalkFaceID string,
 ) {
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
@@ -1222,12 +1368,35 @@ func (h *WebSocketHandler) processStreamingPipeline(
 						Type: "tts_audio_chunk",
 						Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
 					})
-					// Mode 3: 自訂聲音才觸發 Wav2Lip
+					// Mode 3: 唇形動畫（MuseTalk 優先，Wav2Lip 回退）
 					if msg.Mode == 3 {
-						go func(aURL, fURL, fBase64, sid string) {
+						go func(aURL, fURL, fBase64, sid string, mtReady bool, mtFaceID string) {
+							if mtReady {
+								// MuseTalk：即時唇形動畫（~45ms/frame）
+								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
+								if mtErr != nil {
+									log.Printf("MuseTalk 失敗（回退 Wav2Lip）: %v", mtErr)
+								} else {
+									// 逐幀推送 base64 JPEG
+									for fi, frame := range frames {
+										writeWSMessage(conn, WSMessage{
+											Type: "avatar_frame",
+											Data: fiber.Map{
+												"frame":      frame,
+												"index":      fi,
+												"total":      len(frames),
+												"fps":        25,
+												"session_id": sid,
+											},
+										})
+									}
+									return
+								}
+							}
+							// Wav2Lip 回退
 							vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
 							if wErr != nil {
-								log.Printf("唇形動畫失敗: %v", wErr)
+								log.Printf("Wav2Lip 也失敗: %v", wErr)
 								return
 							}
 							if vURL != "" {
@@ -1236,7 +1405,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 									Data: fiber.Map{"video_url": vURL, "session_id": sid},
 								})
 							}
-						}(u, faceImageURL, sessionFaceBase64, sessionID)
+						}(u, faceImageURL, sessionFaceBase64, sessionID, museTalkReady, museTalkFaceID)
 					}
 				} else {
 					// 預設聲音用 MeloTTS（記憶體內，回傳 base64）
@@ -1252,11 +1421,43 @@ func (h *WebSocketHandler) processStreamingPipeline(
 							Type: "tts_audio_chunk",
 							Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
 						})
+						// Mode 3: CosyVoice 回退也觸發 MuseTalk
+						if msg.Mode == 3 && museTalkReady {
+							go func(aURL, sid, mtFaceID string) {
+								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
+								if mtErr != nil {
+									log.Printf("MuseTalk(CosyVoice) 失敗: %v", mtErr)
+									return
+								}
+								for fi, frame := range frames {
+									writeWSMessage(conn, WSMessage{
+										Type: "avatar_frame",
+										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
+									})
+								}
+							}(u, sessionID, museTalkFaceID)
+						}
 					} else {
 						writeWSMessage(conn, WSMessage{
 							Type: "tts_audio_chunk",
 							Data: fiber.Map{"audio_base64": b64, "index": i, "session_id": sessionID},
 						})
+						// Mode 3: MeloTTS base64 音訊也觸發 MuseTalk
+						if msg.Mode == 3 && museTalkReady {
+							go func(audioB64, sid, mtFaceID string) {
+								frames, mtErr := callMuseTalkLipsyncFromBase64(mtFaceID, audioB64, 44100)
+								if mtErr != nil {
+									log.Printf("MuseTalk(MeloTTS) 失敗: %v", mtErr)
+									return
+								}
+								for fi, frame := range frames {
+									writeWSMessage(conn, WSMessage{
+										Type: "avatar_frame",
+										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
+									})
+								}
+							}(b64, sessionID, museTalkFaceID)
+						}
 					}
 				}
 			}(sentence, idx)
