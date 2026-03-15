@@ -225,7 +225,9 @@ WebSocket → 桌面 App (Rust 層自動下載 + 入隊播放)
 | `/api/v1/tts/concatenate` | POST | 合併多段音訊 |
 | `/api/v1/avatar/generate-talking` | POST | TTS + Wav2Lip 臉部動畫 |
 | `/api/v1/avatar/animate-from-audio` | POST | 從既有音訊生成臉部動畫 |
-| `/api/v1/avatar/prepare-face` | POST | 預處理臉部特徵（MuseTalk） |
+| `/api/v1/avatar/prepare-face` | POST | 預處理臉部特徵（MuseTalk，~2s 一次性） |
 | `/api/v1/avatar/stream-lipsync` | POST | 串流唇形動畫（MuseTalk MJPEG） |
+| `/api/v1/avatar/musetalk-lipsync` | POST | MuseTalk 唇形動畫（回傳 base64 JPEG frames） |
+| `/api/v1/avatar/face/{face_id}` | DELETE | 移除 MuseTalk 臉部快取 |
 | `/api/v1/models/status` | GET | GPU 模型狀態（含 MuseTalk） |
 | `/outputs/*` | GET | 靜態檔案（音訊/影片下載） |
