@@ -381,29 +381,32 @@ class MuseTalkHandler:
             audio_prompts = self._extract_whisper_features(warmup_audio)
             timings["whisper_features"] = (time.time() - t0) * 1000
 
-            # Step 5: UNet + VAE decode（跑一幀，確保 dtype 與真實推理一致）
+            # Step 5: UNet + VAE decode（跑一幀暖機）
+            # 注意：沒有真實臉部時 latent dtype 可能不匹配，容許失敗
             t0 = time.time()
-            if len(audio_prompts) > 0:
-                # 建立假 latent（與 VAE 輸出相同 dtype）
-                dummy_latent = torch.zeros(1, 8, 32, 32, device="cuda", dtype=torch.float16)
-                timestep = torch.tensor([0], device="cuda")
-
-                # 取第一幀的 audio prompt，確保是 float16
-                whisper_chunk = audio_prompts[0:1].to(dtype=torch.float16)
-                whisper_chunk = self.pe(whisper_chunk)
-                whisper_chunk = whisper_chunk.to(dtype=torch.float16)
-
-                with torch.no_grad():
-                    pred = self.unet.model(
-                        dummy_latent,
-                        timestep=timestep,
-                        encoder_hidden_states=whisper_chunk
-                    ).sample
-
-                # VAE 解碼
-                decoded = self.vae.decode_latents(pred)
-                _ = decoded[0]  # 觸發計算
-            timings["unet_vae_decode"] = (time.time() - t0) * 1000
+            try:
+                if len(audio_prompts) > 0:
+                    dummy_latent = torch.zeros(1, 8, 32, 32, device="cuda", dtype=torch.float16)
+                    timestep = torch.tensor([0], device="cuda")
+                    whisper_chunk = audio_prompts[0:1]
+                    whisper_chunk = self.pe(whisper_chunk)
+                    # 嘗試匹配 UNet 的 dtype
+                    for p in self.unet.model.parameters():
+                        target_dtype = p.dtype
+                        break
+                    whisper_chunk = whisper_chunk.to(dtype=target_dtype)
+                    dummy_latent = dummy_latent.to(dtype=target_dtype)
+                    with torch.no_grad():
+                        pred = self.unet.model(
+                            dummy_latent, timestep=timestep,
+                            encoder_hidden_states=whisper_chunk
+                        ).sample
+                    decoded = self.vae.decode_latents(pred)
+                    _ = decoded[0]
+                timings["unet_vae_decode"] = (time.time() - t0) * 1000
+            except Exception as e:
+                timings["unet_vae_decode"] = "失敗: %s" % str(e)[:50]
+                logger.warning("warmup UNet/VAE 失敗（首次推理會稍慢）: %s" % e)
 
             # Step 6: 清理暖機快取
             if "__warmup__" in self.face_cache:
