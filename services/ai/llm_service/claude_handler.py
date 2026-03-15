@@ -9,12 +9,12 @@ import anthropic
 
 # 句子級分隔符（優先級高 → 遇到就切）
 SENTENCE_SEPARATORS = ["。", "？", "！", ".", "?", "!"]
-# 逗號級分隔符（最小 chunk 2 字元才切 — 越早切越快開始 TTS）
+# 逗號級分隔符（達到最小長度後遇到就切）
 CLAUSE_SEPARATORS = ["，", "、", "；", ",", ";", "：", ":"]
-# 最小 chunk 長度（2 字元即切，讓首句盡快送出 TTS）
-MIN_CHUNK_LEN = 2
-# 最大 chunk 長度（超過就強制切斷，不等標點。3 字即切 — MeloTTS 3 字只需 ~120ms）
-MAX_CHUNK_LEN = 3
+# 最小 chunk 長度（至少 8 字才切 — 太短 TTS 品質差）
+MIN_CHUNK_LEN = 8
+# 最大 chunk 長度（超過就強制切斷，不等標點）
+MAX_CHUNK_LEN = 30
 
 
 class ClaudeHandler:

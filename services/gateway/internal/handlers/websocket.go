@@ -395,6 +395,8 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		// MuseTalk 臉部預處理狀態
 		var museTalkFaceID string
 		var museTalkReady bool
+		// MuseTalk GPU 串行化：一次只處理一段，避免多 goroutine 搶 GPU
+		museTalkSem := make(chan struct{}, 1)
 
 		// 場景過渡語設定
 		var transitionEnabled bool
@@ -1370,10 +1372,13 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					})
 					// Mode 3: 唇形動畫（MuseTalk 優先，Wav2Lip 回退）
 					if msg.Mode == 3 {
-						go func(aURL, fURL, fBase64, sid string, mtReady bool, mtFaceID string) {
+						go func(aURL, fURL, fBase64, sid string, mtReady bool, mtFaceID string, sem chan struct{}) {
 							if mtReady {
+								// 串行化：等待 GPU 可用
+								sem <- struct{}{}
 								// MuseTalk：即時唇形動畫（~45ms/frame）
 								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
+								<-sem // 釋放 GPU
 								if mtErr != nil {
 									log.Printf("MuseTalk 失敗（回退 Wav2Lip）: %v", mtErr)
 								} else {
@@ -1405,7 +1410,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 									Data: fiber.Map{"video_url": vURL, "session_id": sid},
 								})
 							}
-						}(u, faceImageURL, sessionFaceBase64, sessionID, museTalkReady, museTalkFaceID)
+						}(u, faceImageURL, sessionFaceBase64, sessionID, museTalkReady, museTalkFaceID, museTalkSem)
 					}
 				} else {
 					// 預設聲音用 MeloTTS（記憶體內，回傳 base64）
@@ -1423,8 +1428,10 @@ func (h *WebSocketHandler) processStreamingPipeline(
 						})
 						// Mode 3: CosyVoice 回退也觸發 MuseTalk
 						if msg.Mode == 3 && museTalkReady {
-							go func(aURL, sid, mtFaceID string) {
+							go func(aURL, sid, mtFaceID string, sem chan struct{}) {
+								sem <- struct{}{} // 串行化
 								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
+								<-sem // 釋放 GPU
 								if mtErr != nil {
 									log.Printf("MuseTalk(CosyVoice) 失敗: %v", mtErr)
 									return
@@ -1435,7 +1442,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
 									})
 								}
-							}(u, sessionID, museTalkFaceID)
+							}(u, sessionID, museTalkFaceID, museTalkSem)
 						}
 					} else {
 						writeWSMessage(conn, WSMessage{
@@ -1444,8 +1451,10 @@ func (h *WebSocketHandler) processStreamingPipeline(
 						})
 						// Mode 3: MeloTTS base64 音訊也觸發 MuseTalk
 						if msg.Mode == 3 && museTalkReady {
-							go func(audioB64, sid, mtFaceID string) {
+							go func(audioB64, sid, mtFaceID string, sem chan struct{}) {
+								sem <- struct{}{} // 串行化
 								frames, mtErr := callMuseTalkLipsyncFromBase64(mtFaceID, audioB64, 44100)
+								<-sem // 釋放 GPU
 								if mtErr != nil {
 									log.Printf("MuseTalk(MeloTTS) 失敗: %v", mtErr)
 									return
@@ -1456,7 +1465,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
 									})
 								}
-							}(b64, sessionID, museTalkFaceID)
+							}(b64, sessionID, museTalkFaceID, museTalkSem)
 						}
 					}
 				}

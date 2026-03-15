@@ -18,8 +18,8 @@ fn get_player() -> &'static Arc<Mutex<StreamingPlayer>> {
 
 /// 串流播放器
 pub struct StreamingPlayer {
-    /// 待播放的音訊 chunk 佇列（已解碼的 f32 samples）
-    queue: Arc<Mutex<VecDeque<Vec<f32>>>>,
+    /// 待播放的音訊 chunk 佇列（sample_rate, 已解碼的 f32 samples）
+    queue: Arc<Mutex<VecDeque<(u32, Vec<f32>)>>>,
     /// 目前是否正在播放
     playing: Arc<AtomicBool>,
     /// 佇列中的 chunk 總數（用於追蹤進度）
@@ -81,10 +81,11 @@ pub fn enqueue_audio_chunk(wav_bytes: &[u8]) -> Result<(), String> {
         .map(|frame| frame.iter().sum::<f32>() / wav_channels as f32)
         .collect();
 
-    // 存入佇列
+    // 存入佇列（帶 sample rate）
+    let wav_sample_rate = spec.sample_rate;
     {
         let mut queue = p.queue.lock().map_err(|e| format!("佇列鎖定失敗: {}", e))?;
-        queue.push_back(mono_samples);
+        queue.push_back((wav_sample_rate, mono_samples));
     }
     p.total_chunks.fetch_add(1, Ordering::SeqCst);
 
@@ -126,7 +127,7 @@ fn start_playback(player: &mut StreamingPlayer) -> Result<(), String> {
 
 /// 播放迴圈：從佇列取 chunk → 播放 → 取下一個（gapless）
 fn playback_loop(
-    queue: Arc<Mutex<VecDeque<Vec<f32>>>>,
+    queue: Arc<Mutex<VecDeque<(u32, Vec<f32>)>>>,
     playing: Arc<AtomicBool>,
     played_chunks: Arc<AtomicUsize>,
     cancelled: Arc<AtomicBool>,
@@ -175,7 +176,7 @@ fn playback_loop(
             q.pop_front()
         };
 
-        let samples = match chunk {
+        let (chunk_sample_rate, samples) = match chunk {
             Some(s) => s,
             None => {
                 // 佇列空了，等一下看有沒有新的
@@ -193,9 +194,9 @@ fn playback_loop(
             }
         };
 
-        // 重新取樣到裝置取樣率
-        let resampled = if device_sample_rate != 16000 {
-            simple_resample(&samples, 16000, device_sample_rate)
+        // 重新取樣到裝置取樣率（用 WAV 實際 sample rate）
+        let resampled = if device_sample_rate != chunk_sample_rate {
+            simple_resample(&samples, chunk_sample_rate, device_sample_rate)
         } else {
             samples
         };

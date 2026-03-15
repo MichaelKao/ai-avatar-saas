@@ -148,17 +148,21 @@ async fn start_auto_mode(
 
             {
                 use tauri::Emitter;
+                let skip_reason = if rms < 800.0 {
+                    "(低音量，跳過)"
+                } else if duration_ms < 800 {
+                    "(太短，跳過)"
+                } else {
+                    "(送 STT)"
+                };
                 app_clone.emit("debug-log", &format!(
                     "VAD 語句 #{}: {}ms, RMS={:.0} {}",
-                    count,
-                    duration_ms,
-                    rms,
-                    if rms < 100.0 { "(低音量，跳過)" } else { "(送 STT)" }
+                    count, duration_ms, rms, skip_reason
                 )).ok();
             }
 
-            // RMS 過低的語句跳過
-            if rms < 100.0 {
+            // RMS 過低或語音太短的跳過（減少誤辨識）
+            if rms < 800.0 || duration_ms < 800 {
                 continue;
             }
 
