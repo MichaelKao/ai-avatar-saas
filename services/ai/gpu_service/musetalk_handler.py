@@ -381,17 +381,17 @@ class MuseTalkHandler:
             audio_prompts = self._extract_whisper_features(warmup_audio)
             timings["whisper_features"] = (time.time() - t0) * 1000
 
-            # Step 5: UNet + VAE decode（跑一幀）
+            # Step 5: UNet + VAE decode（跑一幀，確保 dtype 與真實推理一致）
             t0 = time.time()
             if len(audio_prompts) > 0:
-                from einops import rearrange
-                # 建立假 latent（與真實相同 shape: [1, 8, 32, 32]）
+                # 建立假 latent（與 VAE 輸出相同 dtype）
                 dummy_latent = torch.zeros(1, 8, 32, 32, device="cuda", dtype=torch.float16)
                 timestep = torch.tensor([0], device="cuda")
 
-                # 取第一幀的 audio prompt
-                whisper_chunk = audio_prompts[0:1]  # [1, feat_dim, hidden_dim]
+                # 取第一幀的 audio prompt，確保是 float16
+                whisper_chunk = audio_prompts[0:1].to(dtype=torch.float16)
                 whisper_chunk = self.pe(whisper_chunk)
+                whisper_chunk = whisper_chunk.to(dtype=torch.float16)
 
                 with torch.no_grad():
                     pred = self.unet.model(
