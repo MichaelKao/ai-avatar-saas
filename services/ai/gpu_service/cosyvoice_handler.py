@@ -44,7 +44,7 @@ class CosyVoiceHandler:
 
             # 載入 SFT 模型（有內建中文女/男 speaker）
             sft_paths = [
-                model_dir / "CosyVoice-300M-SFT",
+                self.model_dir / "CosyVoice-300M-SFT",
                 Path("/workspace/CosyVoice/pretrained_models/CosyVoice-300M-SFT"),
             ]
             for p in sft_paths:
@@ -56,7 +56,7 @@ class CosyVoiceHandler:
 
             # 載入 zero-shot 模型（語音克隆用）
             zs_paths = [
-                model_dir / "CosyVoice2-0.5B",
+                self.model_dir / "CosyVoice2-0.5B",
                 Path("/workspace/CosyVoice/pretrained_models/CosyVoice2-0.5B"),
             ]
             for p in zs_paths:
