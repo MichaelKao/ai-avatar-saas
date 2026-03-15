@@ -184,7 +184,15 @@ pub async fn setup_virtual_camera(
     )
     .await?;
 
-    // 5. 啟動虛擬鏡頭（可能已經在跑，忽略錯誤）
+    // 5. 強制 Browser Source 重新載入（確保內容最新）
+    let _ = conn
+        .request(
+            "PressInputPropertiesButton",
+            json!({ "inputName": source_name, "propertyName": "refreshnocache" }),
+        )
+        .await;
+
+    // 6. 啟動虛擬鏡頭（可能已經在跑，忽略錯誤）
     let _ = conn.request("StartVirtualCam", json!({})).await;
 
     // 關閉 WebSocket 連線（虛擬鏡頭會繼續運行）
