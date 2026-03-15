@@ -1543,30 +1543,35 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
 			} else {
-				// MeloTTS 為主要 TTS（~309ms 快速、中文清晰穩定）
-				// CosyVoice 語音品質不穩定，暫停使用
-				ttsEngine = "melotts"
-				b64, ttsErr := callMeloTTS(ctx, sent.text, voiceGender)
+				// TTS 優先順序：CosyVoice（品質好）→ MeloTTS（快速）→ Edge TTS（最穩定）
+				ttsEngine = "cosyvoice"
+				b64, ttsErr := callCosyVoiceStreamBase64(ctx, sent.text, voiceGender)
 				if ttsErr != nil || b64 == "" {
-					log.Printf("MeloTTS #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
-					// 回退 Edge TTS
-					ttsEngine = "edge-tts"
-					b64, ttsErr = callEdgeTTSBase64(ctx, sent.text, voiceGender)
+					log.Printf("CosyVoice #%d 失敗: %v，嘗試 MeloTTS", sent.index, ttsErr)
+					ttsEngine = "melotts"
+					b64, ttsErr = callMeloTTS(ctx, sent.text, voiceGender)
 					if ttsErr != nil || b64 == "" {
-						log.Printf("Edge TTS #%d 也失敗: %v", sent.index, ttsErr)
-						continue
+						log.Printf("MeloTTS #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
+						ttsEngine = "edge-tts"
+						b64, ttsErr = callEdgeTTSBase64(ctx, sent.text, voiceGender)
+						if ttsErr != nil || b64 == "" {
+							log.Printf("全部 TTS #%d 失敗: %v", sent.index, ttsErr)
+							safeWriteWSMessage(conn, &wsMu, WSMessage{
+								Type: "error",
+								Data: fiber.Map{"message": fmt.Sprintf("TTS #%d 全部失敗", sent.index)},
+							})
+							continue
+						}
 					}
 				}
 				audioB64 = b64
 				atomic.AddInt64(&ttsTotalMs, time.Since(ttsStart).Milliseconds())
 				atomic.AddInt64(&ttsCount, 1)
-				// Mode 3 + MuseTalk：不立刻送音訊，等唇形完成後一起送（保證同步）
-				if museTalkChan == nil {
-					safeWriteWSMessage(conn, &wsMu, WSMessage{
-						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-					})
-				}
+				// 立刻送音訊給客戶端（保證有聲音，不等 MuseTalk）
+				safeWriteWSMessage(conn, &wsMu, WSMessage{
+					Type: "tts_audio_chunk",
+					Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
+				})
 			}
 
 			// 送入 MuseTalk 佇列（Mode 3 用，包含音訊資料等唇形完成後同步送出）
@@ -1576,9 +1581,9 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		}
 	}()
 
-	// 循序 MuseTalk 消費者 — Mode 3 音訊+唇形同步送出
-	// 策略：MuseTalk 生成完所有幀後，一次送 tts_synced_chunk（含音訊+幀陣列）
-	// 客戶端收到後同時開始播放音訊和顯示唇形幀，確保嘴巴跟聲音同步
+	// 循序 MuseTalk 消費者 — Mode 3 唇形動畫（音訊已由 TTS 消費者立即送出）
+	// 策略：MuseTalk 生成幀後逐幀送 avatar_frame，音訊不等唇形
+	// 這樣即使 MuseTalk 失敗或延遲，音訊仍然正常播放
 	if museTalkChan != nil {
 		pipelineWg.Add(1)
 		go func() {
@@ -1600,36 +1605,23 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				atomic.AddInt64(&museTalkTotalMs, time.Since(mtStart).Milliseconds())
 				atomic.AddInt64(&museTalkCount, 1)
 				if mtErr != nil {
-					log.Printf("MuseTalk #%d 失敗: %v，回退送純音訊", work.index, mtErr)
-					// MuseTalk 失敗，回退送純音訊（至少有聲音）
-					if work.audioB64 != "" {
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_base64": work.audioB64, "index": work.index, "session_id": sessionID, "text": work.text, "tts_engine": work.ttsEngine},
-						})
-					} else if work.audioURL != "" {
-						safeWriteWSMessage(conn, &wsMu, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_url": work.audioURL, "index": work.index, "session_id": sessionID, "text": work.text, "tts_engine": work.ttsEngine},
-						})
-					}
+					log.Printf("MuseTalk #%d 失敗: %v（音訊已送出，跳過唇形）", work.index, mtErr)
 					continue
 				}
-				log.Printf("MuseTalk #%d 完成：%d 幀，同步送出音訊+唇形", work.index, len(frames))
-				// 音訊+唇形幀同步送出 — 客戶端同時開始播放音訊和動畫
-				safeWriteWSMessage(conn, &wsMu, WSMessage{
-					Type: "tts_synced_chunk",
-					Data: fiber.Map{
-						"audio_base64": work.audioB64,
-						"audio_url":    work.audioURL,
-						"frames":       frames,
-						"fps":          25,
-						"index":        work.index,
-						"session_id":   sessionID,
-						"text":         work.text,
-						"tts_engine":   work.ttsEngine,
-					},
-				})
+				log.Printf("MuseTalk #%d 完成：%d 幀", work.index, len(frames))
+				// 逐幀送出唇形動畫（音訊已由 TTS 消費者送出）
+				for i, frame := range frames {
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
+						Type: "avatar_frame",
+						Data: fiber.Map{
+							"frame":      frame,
+							"index":      work.index,
+							"frame_idx":  i,
+							"total":      len(frames),
+							"session_id": sessionID,
+						},
+					})
+				}
 			}
 		}()
 	}
