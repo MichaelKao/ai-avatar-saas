@@ -539,16 +539,25 @@ function MainApp() {
   const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem('setupDone') === 'true');
 
-  // Settings — 自動修正舊的 RunPod apiUrl（RunPod 不轉發 Gateway 路由）
+  // Settings — Gateway 和 GPU 都走 RunPod nginx 路由（同一個 URL）
+  const defaultUrl = 'https://twjgc6ahrdxohs-8888.proxy.runpod.net';
   const [apiUrl, setApiUrl] = useState(() => {
     const stored = localStorage.getItem('apiUrl') || '';
-    if (stored.includes('proxy.runpod.net')) {
-      localStorage.setItem('apiUrl', 'https://ai-avatar-saas-production.up.railway.app');
-      return 'https://ai-avatar-saas-production.up.railway.app';
+    // 遷移舊 URL（Railway 或舊 RunPod pod）到新 RunPod
+    if (stored.includes('railway.app') || stored.includes('yam5ie51sqxres')) {
+      localStorage.setItem('apiUrl', defaultUrl);
+      return defaultUrl;
     }
-    return stored || 'https://ai-avatar-saas-production.up.railway.app';
+    return stored || defaultUrl;
   });
-  const [gpuUrl, setGpuUrl] = useState(() => localStorage.getItem('gpuUrl') || 'https://yam5ie51sqxres-8888.proxy.runpod.net');
+  const [gpuUrl, setGpuUrl] = useState(() => {
+    const stored = localStorage.getItem('gpuUrl') || '';
+    if (stored.includes('yam5ie51sqxres')) {
+      localStorage.setItem('gpuUrl', defaultUrl);
+      return defaultUrl;
+    }
+    return stored || defaultUrl;
+  });
   const [mode, setMode] = useState(() => {
     const stored = localStorage.getItem('mode');
     // 舊版預設 Mode 3 需要 OBS，新版降級為 Mode 2 更穩定

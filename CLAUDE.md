@@ -4,11 +4,11 @@
 | 服務 | URL | 說明 |
 |------|-----|------|
 | Web 前端 | https://ai-avatar-saas-production-f9f9.up.railway.app | Next.js 前台，Railway 部署 |
-| API Gateway | https://yam5ie51sqxres-8888.proxy.runpod.net | Go Fiber，RunPod 共置（nginx 路由） |
+| API Gateway | https://twjgc6ahrdxohs-8888.proxy.runpod.net | Go Fiber，RunPod 共置（nginx 路由） |
 | API Gateway (Railway) | https://ai-avatar-saas-production.up.railway.app | Go Fiber，Railway 備用 |
-| GPU 服務 | https://yam5ie51sqxres-8888.proxy.runpod.net | RunPod RTX 4090 (25.4GB)，含 STT/TTS/Avatar/LLM proxy |
-| 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/health | Gateway（nginx 路由到 port 3333） |
-| GPU 健康檢查 | https://yam5ie51sqxres-8888.proxy.runpod.net/api/v1/models/status | GPU 模型狀態 |
+| GPU 服務 | https://twjgc6ahrdxohs-8888.proxy.runpod.net | RunPod RTX 4090 (25.4GB)，含 STT/TTS/Avatar/LLM proxy |
+| 健康檢查 | https://twjgc6ahrdxohs-8888.proxy.runpod.net/health | Gateway（nginx 路由到 port 3333） |
+| GPU 健康檢查 | https://twjgc6ahrdxohs-8888.proxy.runpod.net/api/v1/models/status | GPU 模型狀態 |
 | 桌面版下載 | https://github.com/MichaelKao/ai-avatar-saas/releases | Tauri 2 桌面安裝檔 |
 
 ## 搬網域時需要改的地方
@@ -27,7 +27,7 @@ RunPod Gateway 環境變數（`/workspace/start_gateway.sh`）：
 |------|--------|------|
 | `AI_SERVICE_URL` | `http://localhost:8889` | LLM 代理（同機 localhost） |
 | `GPU_SERVICE_URL` | `http://localhost:8889` | TTS + Wav2Lip + STT（同機 localhost） |
-| `GPU_PUBLIC_URL` | `https://yam5ie51sqxres-8888.proxy.runpod.net` | 客戶端下載音訊/影片用的公開 URL |
+| `GPU_PUBLIC_URL` | `https://twjgc6ahrdxohs-8888.proxy.runpod.net` | 客戶端下載音訊/影片用的公開 URL |
 | `DATABASE_URL` | Railway PostgreSQL 外部連線 | 資料庫仍在 Railway |
 | `REDIS_URL` | Railway Redis 外部連線 | Redis 仍在 Railway |
 
@@ -45,10 +45,10 @@ Railway 上仍保留 Gateway 部署，作為備用。
 - 桌面版下載連結 → GitHub Release URL
 
 ### 4. RunPod GPU 服務
-- **Pod ID**：`yam5ie51sqxres`
+- **Pod ID**：`twjgc6ahrdxohs`
 - **外部 proxy**：port 8888（nginx）
 - **內部 ports**：8889 (GPU+STT combined), 8002 (LLM), 3333 (Gateway)
-- 如果換 RunPod Pod，需更新所有 `yam5ie51sqxres` 相關 URL
+- 如果換 RunPod Pod，需更新所有 `twjgc6ahrdxohs` 相關 URL
 
 ### 5. 本地 .env 檔
 - `services/gateway/.env` — `AI_SERVICE_URL`、`GPU_SERVICE_URL`、`GPU_PUBLIC_URL`
