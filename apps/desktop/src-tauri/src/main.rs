@@ -33,6 +33,7 @@ fn main() {
             cancel_audio_playback,
             open_avatar_window,
             close_avatar_window,
+            emit_avatar_frame,
             emit_avatar_video,
             emit_avatar_face,
             start_obs_virtual_cam,
@@ -744,6 +745,15 @@ async fn close_avatar_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("avatar") {
         window.close().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// 發送 MuseTalk 動畫幀到 Avatar 視窗（base64 JPEG）
+#[tauri::command]
+async fn emit_avatar_frame(app: tauri::AppHandle, frame: String) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit_to("avatar", "avatar-frame-update", &frame)
+        .map_err(|e| format!("發送失敗: {}", e))?;
     Ok(())
 }
 
