@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 class CosyVoiceHandler:
     """CosyVoice TTS — 支援 SFT 內建聲音 + zero-shot 語音克隆"""
 
-    def __init__(self, model_dir: Path):
-        self.model_dir = model_dir
+    def __init__(self, model_dir):
+        self.model_dir = Path(model_dir) if not isinstance(model_dir, Path) else model_dir
         self.voice_profiles = {}  # voice_id -> speaker embedding
         self.sft_model = None  # 300M-SFT（有內建 speaker）
         self.zs_model = None   # 2.0-0.5B（zero-shot 克隆）
