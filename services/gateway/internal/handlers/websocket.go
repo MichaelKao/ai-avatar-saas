@@ -588,8 +588,17 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 	})
 }
 
-// writeWSMessage 將訊息寫入 WebSocket 連線
+// writeWSMessage 將訊息寫入 WebSocket 連線（單一 goroutine 用）
 func writeWSMessage(conn *websocket.Conn, msg WSMessage) {
+	if err := conn.WriteJSON(msg); err != nil {
+		log.Printf("WebSocket 寫入錯誤: %v", err)
+	}
+}
+
+// safeWriteWSMessage 線程安全版本（多 goroutine 並行寫入用）
+func safeWriteWSMessage(conn *websocket.Conn, mu *sync.Mutex, msg WSMessage) {
+	mu.Lock()
+	defer mu.Unlock()
 	if err := conn.WriteJSON(msg); err != nil {
 		log.Printf("WebSocket 寫入錯誤: %v", err)
 	}
@@ -865,9 +874,61 @@ func callCosyVoiceStreamBase64(ctx context.Context, text, voiceGender string) (s
 		return "", fmt.Errorf("CosyVoice 串流讀取失敗: %v (len=%d)", err, len(pcmData))
 	}
 
+	// 正規化音量（CosyVoice 男聲音量僅女聲的 1/5，通話會聽不清楚）
+	pcmData = normalizePCM16(pcmData)
+
 	// PCM → WAV → base64（記憶體內，不寫檔）
 	wavData := pcmToWAV(pcmData, 22050, 1, 16)
 	return base64.StdEncoding.EncodeToString(wavData), nil
+}
+
+// normalizePCM16 正規化 16-bit PCM 音量到目標峰值（~80% 滿幅）
+// 防止 CosyVoice 部分 speaker 音量過低導致 VB-Cable 通話聽不清楚
+func normalizePCM16(pcm []byte) []byte {
+	samples := len(pcm) / 2
+	if samples == 0 {
+		return pcm
+	}
+
+	// 找出最大振幅
+	var maxAmp int16
+	for i := 0; i < samples; i++ {
+		s := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+		if s < 0 {
+			s = -s
+		}
+		if s > maxAmp {
+			maxAmp = s
+		}
+	}
+
+	// 太安靜的音訊（可能是靜音）不處理；已經夠大聲的也不處理
+	if maxAmp < 100 {
+		return pcm
+	}
+	targetPeak := int16(26000) // ~80% of 32767
+	if maxAmp >= targetPeak {
+		return pcm
+	}
+
+	gain := float64(targetPeak) / float64(maxAmp)
+	if gain > 8.0 {
+		gain = 8.0 // 限制增益避免放大噪音
+	}
+
+	result := make([]byte, len(pcm))
+	for i := 0; i < samples; i++ {
+		s := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+		amplified := float64(s) * gain
+		// 硬限幅（clipping）
+		if amplified > 32767 {
+			amplified = 32767
+		} else if amplified < -32768 {
+			amplified = -32768
+		}
+		binary.LittleEndian.PutUint16(result[i*2:], uint16(int16(amplified)))
+	}
+	return result
 }
 
 // pcmToWAV 把 raw PCM bytes 轉成 WAV 格式
@@ -1342,6 +1403,9 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 	startTime := time.Now()
 
+	// WebSocket 寫入鎖 — TTS goroutine 和 MuseTalk goroutine 並行寫入需要保護
+	var wsMu sync.Mutex
+
 	// MuseTalk 工作項目
 	type museTalkWork struct {
 		audioB64 string
@@ -1389,7 +1453,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				}
 				ttsEngine = "custom"
 				audioURL = u
-				writeWSMessage(conn, WSMessage{
+				safeWriteWSMessage(conn, &wsMu, WSMessage{
 					Type: "tts_audio_chunk",
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
@@ -1406,13 +1470,13 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					}
 					ttsEngine = "edge-tts"
 					audioURL = u
-					writeWSMessage(conn, WSMessage{
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
 						Type: "tts_audio_chunk",
 						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 					})
 				} else {
 					audioB64 = b64
-					writeWSMessage(conn, WSMessage{
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
 						Type: "tts_audio_chunk",
 						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 					})
@@ -1449,10 +1513,19 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					continue
 				}
 				for fi, frame := range frames {
-					writeWSMessage(conn, WSMessage{
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
 						Type: "avatar_frame",
 						Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sessionID},
 					})
+					// 每幀間隔 40ms（25 FPS），避免一次全送導致前端來不及渲染
+					if fi < len(frames)-1 {
+						time.Sleep(40 * time.Millisecond)
+					}
 				}
 			}
 		}()
@@ -1465,7 +1538,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		case <-ctx.Done():
 			log.Printf("Pipeline 被打斷")
 			close(sentChan)
-			writeWSMessage(conn, WSMessage{
+			safeWriteWSMessage(conn, &wsMu, WSMessage{
 				Type: "thinking_animation",
 				Data: fiber.Map{"status": "stop"},
 			})
@@ -1497,7 +1570,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		fullText.WriteString(sentence)
 
 		// 逐句推送文字給客戶端
-		writeWSMessage(conn, WSMessage{
+		safeWriteWSMessage(conn, &wsMu, WSMessage{
 			Type: "suggestion_text",
 			Data: fiber.Map{
 				"text":       fullText.String(),
@@ -1515,7 +1588,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	llmElapsed := time.Since(startTime)
 
 	// 停止思考動畫
-	writeWSMessage(conn, WSMessage{
+	safeWriteWSMessage(conn, &wsMu, WSMessage{
 		Type: "thinking_animation",
 		Data: fiber.Map{"status": "stop"},
 	})
@@ -1523,12 +1596,12 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	// 發送完整文字
 	finalText := fullText.String()
 	if finalText == "" {
-		writeWSMessage(conn, WSMessage{Type: "error", Data: "AI 無回覆"})
+		safeWriteWSMessage(conn, &wsMu, WSMessage{Type: "error", Data: "AI 無回覆"})
 		pipelineWg.Wait()
 		return
 	}
 
-	writeWSMessage(conn, WSMessage{
+	safeWriteWSMessage(conn, &wsMu, WSMessage{
 		Type: "suggestion_text",
 		Data: fiber.Map{
 			"text":       finalText,
@@ -1543,7 +1616,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 	// 發送串流結束信號
 	if msg.Mode >= 2 {
-		writeWSMessage(conn, WSMessage{
+		safeWriteWSMessage(conn, &wsMu, WSMessage{
 			Type: "tts_stream_end",
 			Data: fiber.Map{
 				"session_id":   sessionID,

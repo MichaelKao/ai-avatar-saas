@@ -78,9 +78,34 @@ const IconCamera = () => (
 // ---------------------------------------------------------------------------
 function AvatarWindow() {
   const avatarRef = useRef<HTMLVideoElement | null>(null);
+  const frameImgRef = useRef<HTMLImageElement | null>(null);
+  const frameQueueRef = useRef<string[]>([]);
+  const playbackTimerRef = useRef<number | null>(null);
   const [showAvatar, setShowAvatar] = useState(false);
   const [faceSnapshot, setFaceSnapshot] = useState('');
-  const [currentFrame, setCurrentFrame] = useState('');
+  const [hasFrame, setHasFrame] = useState(false);
+
+  // 25 FPS 幀播放器 — 從佇列取幀，直接更新 DOM（跳過 React 渲染）
+  const startFramePlayback = useCallback(() => {
+    if (playbackTimerRef.current) return; // 已在播放
+    playbackTimerRef.current = window.setInterval(() => {
+      const queue = frameQueueRef.current;
+      if (queue.length === 0) {
+        // 佇列空了，停止計時器
+        if (playbackTimerRef.current) {
+          clearInterval(playbackTimerRef.current);
+          playbackTimerRef.current = null;
+        }
+        return;
+      }
+      const frame = queue.shift()!;
+      if (frameImgRef.current) {
+        frameImgRef.current.src = `data:image/jpeg;base64,${frame}`;
+        frameImgRef.current.style.display = 'block';
+      }
+      if (!hasFrame) setHasFrame(true);
+    }, 40); // 40ms = 25 FPS
+  }, [hasFrame]);
 
   // 接收臉部截圖（webcam 不可用時的備用畫面）
   useEffect(() => {
@@ -90,10 +115,32 @@ function AvatarWindow() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // 接收 MuseTalk 即時唇形幀（base64 JPEG）
+  // 接收 MuseTalk 即時唇形幀 — 加入佇列，啟動播放器
   useEffect(() => {
     const unlisten = listen<string>('avatar-frame-update', (event) => {
-      if (event.payload) setCurrentFrame(event.payload);
+      if (event.payload) {
+        frameQueueRef.current.push(event.payload);
+        startFramePlayback();
+      }
+    });
+    return () => {
+      unlisten.then(fn => fn());
+      if (playbackTimerRef.current) {
+        clearInterval(playbackTimerRef.current);
+        playbackTimerRef.current = null;
+      }
+    };
+  }, [startFramePlayback]);
+
+  // 新回答開始時清空舊幀佇列
+  useEffect(() => {
+    const unlisten = listen<string>('ws-message', (event) => {
+      try {
+        const msg = JSON.parse(event.payload);
+        if (msg.type === 'thinking_animation' && msg.data?.status === 'start') {
+          frameQueueRef.current = [];
+        }
+      } catch { /* 非 JSON 忽略 */ }
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
@@ -143,14 +190,12 @@ function AvatarWindow() {
           alt=""
         />
       )}
-      {/* MuseTalk 即時唇形幀（蓋住靜態截圖） */}
-      {currentFrame && (
-        <img
-          src={`data:image/jpeg;base64,${currentFrame}`}
-          style={{ ...fullCover, zIndex: 5 }}
-          alt=""
-        />
-      )}
+      {/* MuseTalk 即時唇形幀 — 直接 DOM 操作，跳過 React 渲染瓶頸 */}
+      <img
+        ref={frameImgRef}
+        style={{ ...fullCover, zIndex: 5, display: 'none' }}
+        alt=""
+      />
       {/* Wav2Lip 影片（最上層） */}
       <video
         ref={avatarRef}
@@ -160,7 +205,7 @@ function AvatarWindow() {
         onError={handleAvatarEnded}
       />
       {/* 無任何畫面時顯示提示 */}
-      {!faceSnapshot && !currentFrame && (
+      {!faceSnapshot && !hasFrame && (
         <div style={{
           ...fullCover, display: 'flex', alignItems: 'center', justifyContent: 'center',
           color: '#475569', fontSize: 14, textAlign: 'center',
