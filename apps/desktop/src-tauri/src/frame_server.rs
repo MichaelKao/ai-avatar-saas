@@ -91,13 +91,64 @@ pub async fn start(port: u16) {
         };
         let store = get_frame_store().clone();
         tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 8192];
             let n = match stream.read(&mut buf).await {
                 Ok(n) if n > 0 => n,
                 _ => return,
             };
             let request = String::from_utf8_lossy(&buf[..n]);
+            let method = request.split_whitespace().next().unwrap_or("GET");
             let path = request.split_whitespace().nth(1).unwrap_or("/");
+
+            // POST /write — 接受原始 JPEG bytes 寫入幀（測試用）
+            if method == "POST" && path.starts_with("/write") {
+                // 解析 Content-Length
+                let content_length: usize = request
+                    .lines()
+                    .find(|l| l.to_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+
+                if content_length == 0 {
+                    let resp = b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nMissing Content-Length";
+                    stream.write_all(resp).await.ok();
+                    return;
+                }
+
+                // 找到 header 和 body 的分界（\r\n\r\n）
+                let header_str = &buf[..n];
+                let body_start = header_str
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|p| p + 4)
+                    .unwrap_or(n);
+
+                let mut body = Vec::with_capacity(content_length);
+                // 已經在 buf 中的 body 部分
+                if body_start < n {
+                    body.extend_from_slice(&buf[body_start..n]);
+                }
+                // 讀取剩餘 body
+                while body.len() < content_length {
+                    let mut tmp = [0u8; 8192];
+                    match stream.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => body.extend_from_slice(&tmp[..n]),
+                        Err(_) => break,
+                    }
+                }
+
+                let count = FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("Frame server: POST /write 收到幀 #{} ({}KB)", count, body.len() / 1024);
+                let mut guard = store.lock().await;
+                *guard = body;
+                drop(guard);
+
+                let resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK";
+                stream.write_all(resp).await.ok();
+                return;
+            }
 
             if path.starts_with("/frame") {
                 REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);

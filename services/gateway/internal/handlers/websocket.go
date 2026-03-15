@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -35,14 +36,16 @@ type WSMessage struct {
 
 // TranscriptionMessage 語音辨識文字訊息
 type TranscriptionMessage struct {
-	Text            string `json:"text"`
-	SessionID       string `json:"session_id"`
-	Language        string `json:"language"`
-	Mode            int    `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
-	VoiceGender     string `json:"voice_gender,omitempty"`      // "male" 或 "female"
-	FaceImageBase64 string `json:"face_image_base64,omitempty"` // 即時 webcam 截圖
-	MsgType         string `json:"type,omitempty"`               // "interrupt" 等控制訊息
-	CustomPrompt    string `json:"custom_prompt,omitempty"`     // 自訂 prompt（面試模式等）
+	Text            string    `json:"text"`
+	SessionID       string    `json:"session_id"`
+	Language        string    `json:"language"`
+	Mode            int       `json:"mode"` // 1=Prompt, 2=Avatar, 3=Full
+	VoiceGender     string    `json:"voice_gender,omitempty"`      // "male" 或 "female"
+	FaceImageBase64 string    `json:"face_image_base64,omitempty"` // 即時 webcam 截圖
+	MsgType         string    `json:"type,omitempty"`               // "interrupt" 等控制訊息
+	CustomPrompt    string    `json:"custom_prompt,omitempty"`     // 自訂 prompt（面試模式等）
+	SttLatencyMs    int64     `json:"stt_latency_ms,omitempty"`    // STT 延遲（客戶端回報，毫秒）
+	ReceivedAt      time.Time `json:"-"`                           // Gateway 收到訊息的時間戳（內部用）
 }
 
 // AIServiceRequest 呼叫 AI 服務的請求
@@ -565,7 +568,13 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 				continue
 			}
 
-			log.Printf("收到訊息: %s", msg.Text)
+			// 記錄收到時間戳（用於 Pipeline 計時）
+			msg.ReceivedAt = time.Now()
+			if msg.SttLatencyMs > 0 {
+				log.Printf("收到訊息: %s (STT延遲=%dms)", msg.Text, msg.SttLatencyMs)
+			} else {
+				log.Printf("收到訊息: %s", msg.Text)
+			}
 
 			// 取消進行中的 pipeline（新訊息覆蓋舊的）
 			cancelMu.Lock()
@@ -1453,14 +1462,24 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 	startTime := time.Now()
 
+	// === Pipeline 計時變數 ===
+	var llmFirstTokenMs int64   // LLM 首 token 延遲（ms）
+	var ttsTotalMs int64        // TTS 累計耗時（ms，atomic）
+	var ttsCount int64          // TTS 處理段數（atomic）
+	var museTalkTotalMs int64   // MuseTalk 累計耗時（ms，atomic）
+	var museTalkCount int64     // MuseTalk 處理段數（atomic）
+	llmFirstTokenRecorded := false
+
 	// WebSocket 寫入鎖 — TTS goroutine 和 MuseTalk goroutine 並行寫入需要保護
 	var wsMu sync.Mutex
 
-	// MuseTalk 工作項目
+	// MuseTalk 工作項目（Mode 3：音訊等唇形完成才一起送，保證同步）
 	type museTalkWork struct {
-		audioB64 string
-		audioURL string
-		index    int
+		audioB64  string
+		audioURL  string
+		index     int
+		text      string
+		ttsEngine string
 	}
 
 	// 句子 channel：LLM 串流 → 循序 TTS 消費者
@@ -1508,6 +1527,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 			var audioB64, audioURL string
 
 			ttsEngine := "cosyvoice"
+			ttsStart := time.Now()
 			if useCustomVoice {
 				u, ttsErr := callGPUTTS(sent.text, voiceID, voiceGender)
 				if ttsErr != nil || u == "" {
@@ -1516,6 +1536,8 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				}
 				ttsEngine = "custom"
 				audioURL = u
+				atomic.AddInt64(&ttsTotalMs, time.Since(ttsStart).Milliseconds())
+				atomic.AddInt64(&ttsCount, 1)
 				safeWriteWSMessage(conn, &wsMu, WSMessage{
 					Type: "tts_audio_chunk",
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
@@ -1536,20 +1558,27 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					}
 				}
 				audioB64 = b64
-				safeWriteWSMessage(conn, &wsMu, WSMessage{
-					Type: "tts_audio_chunk",
-					Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-				})
+				atomic.AddInt64(&ttsTotalMs, time.Since(ttsStart).Milliseconds())
+				atomic.AddInt64(&ttsCount, 1)
+				// Mode 3 + MuseTalk：不立刻送音訊，等唇形完成後一起送（保證同步）
+				if museTalkChan == nil {
+					safeWriteWSMessage(conn, &wsMu, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
+					})
+				}
 			}
 
-			// 送入 MuseTalk 佇列（Mode 3 用）
+			// 送入 MuseTalk 佇列（Mode 3 用，包含音訊資料等唇形完成後同步送出）
 			if museTalkChan != nil && (audioB64 != "" || audioURL != "") {
-				museTalkChan <- museTalkWork{audioB64: audioB64, audioURL: audioURL, index: sent.index}
+				museTalkChan <- museTalkWork{audioB64: audioB64, audioURL: audioURL, index: sent.index, text: sent.text, ttsEngine: ttsEngine}
 			}
 		}
 	}()
 
-	// 循序 MuseTalk 消費者（與 TTS 並行，自己內部循序，保證幀順序）
+	// 循序 MuseTalk 消費者 — Mode 3 音訊+唇形同步送出
+	// 策略：MuseTalk 生成完所有幀後，一次送 tts_synced_chunk（含音訊+幀陣列）
+	// 客戶端收到後同時開始播放音訊和顯示唇形幀，確保嘴巴跟聲音同步
 	if museTalkChan != nil {
 		pipelineWg.Add(1)
 		go func() {
@@ -1562,30 +1591,45 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				}
 				var frames []string
 				var mtErr error
+				mtStart := time.Now()
 				if work.audioB64 != "" {
 					frames, mtErr = callMuseTalkLipsyncFromBase64(museTalkFaceID, work.audioB64, 22050)
 				} else if work.audioURL != "" {
 					frames, mtErr = callMuseTalkLipsync(museTalkFaceID, work.audioURL)
 				}
+				atomic.AddInt64(&museTalkTotalMs, time.Since(mtStart).Milliseconds())
+				atomic.AddInt64(&museTalkCount, 1)
 				if mtErr != nil {
-					log.Printf("MuseTalk #%d 失敗: %v", work.index, mtErr)
+					log.Printf("MuseTalk #%d 失敗: %v，回退送純音訊", work.index, mtErr)
+					// MuseTalk 失敗，回退送純音訊（至少有聲音）
+					if work.audioB64 != "" {
+						safeWriteWSMessage(conn, &wsMu, WSMessage{
+							Type: "tts_audio_chunk",
+							Data: fiber.Map{"audio_base64": work.audioB64, "index": work.index, "session_id": sessionID, "text": work.text, "tts_engine": work.ttsEngine},
+						})
+					} else if work.audioURL != "" {
+						safeWriteWSMessage(conn, &wsMu, WSMessage{
+							Type: "tts_audio_chunk",
+							Data: fiber.Map{"audio_url": work.audioURL, "index": work.index, "session_id": sessionID, "text": work.text, "tts_engine": work.ttsEngine},
+						})
+					}
 					continue
 				}
-				for fi, frame := range frames {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					safeWriteWSMessage(conn, &wsMu, WSMessage{
-						Type: "avatar_frame",
-						Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sessionID},
-					})
-					// 每幀間隔 40ms（25 FPS），避免一次全送導致前端來不及渲染
-					if fi < len(frames)-1 {
-						time.Sleep(40 * time.Millisecond)
-					}
-				}
+				log.Printf("MuseTalk #%d 完成：%d 幀，同步送出音訊+唇形", work.index, len(frames))
+				// 音訊+唇形幀同步送出 — 客戶端同時開始播放音訊和動畫
+				safeWriteWSMessage(conn, &wsMu, WSMessage{
+					Type: "tts_synced_chunk",
+					Data: fiber.Map{
+						"audio_base64": work.audioB64,
+						"audio_url":    work.audioURL,
+						"frames":       frames,
+						"fps":          25,
+						"index":        work.index,
+						"session_id":   sessionID,
+						"text":         work.text,
+						"tts_engine":   work.ttsEngine,
+					},
+				})
 			}
 		}()
 	}
@@ -1620,6 +1664,13 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		}
 		if json.Unmarshal([]byte(data), &event) != nil || event.Text == "" {
 			continue
+		}
+
+		// LLM 首 token 計時
+		if !llmFirstTokenRecorded {
+			llmFirstTokenMs = time.Since(startTime).Milliseconds()
+			llmFirstTokenRecorded = true
+			log.Printf("LLM 首 token: %dms", llmFirstTokenMs)
 		}
 
 		sentence := event.Text
@@ -1684,7 +1735,32 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		})
 	}
 
-	log.Printf("Pipeline 完成: LLM=%dms, 句子=%d", llmElapsed.Milliseconds(), len(sentences))
+	totalElapsed := time.Since(startTime).Milliseconds()
+	sttLatency := msg.SttLatencyMs
+	log.Printf("Pipeline 統計: STT=%dms, LLM首token=%dms, LLM全部=%dms(×%d段), TTS=%dms(×%d段), MuseTalk=%dms(×%d段), 總計=%dms",
+		sttLatency,
+		llmFirstTokenMs,
+		llmElapsed.Milliseconds(), len(sentences),
+		atomic.LoadInt64(&ttsTotalMs), atomic.LoadInt64(&ttsCount),
+		atomic.LoadInt64(&museTalkTotalMs), atomic.LoadInt64(&museTalkCount),
+		totalElapsed,
+	)
+	// 也透過 WebSocket 回傳統計給客戶端（可用於 debug UI）
+	safeWriteWSMessage(conn, &wsMu, WSMessage{
+		Type: "pipeline_stats",
+		Data: fiber.Map{
+			"stt_ms":            sttLatency,
+			"llm_first_token_ms": llmFirstTokenMs,
+			"llm_total_ms":      llmElapsed.Milliseconds(),
+			"llm_segments":      len(sentences),
+			"tts_total_ms":      atomic.LoadInt64(&ttsTotalMs),
+			"tts_segments":      atomic.LoadInt64(&ttsCount),
+			"musetalk_total_ms": atomic.LoadInt64(&museTalkTotalMs),
+			"musetalk_segments": atomic.LoadInt64(&museTalkCount),
+			"total_ms":          totalElapsed,
+			"session_id":        sessionID,
+		},
+	})
 }
 
 // processNonStreaming 非串流模式（回退用）

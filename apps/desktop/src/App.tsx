@@ -812,8 +812,15 @@ function MainApp() {
         } else if (msg.type === 'tts_stream_end') {
           const total = msg.data?.total_chunks ?? 0;
           addLog('ai-audio', `語音串流完成 (${total} 段)`);
+        } else if (msg.type === 'tts_synced_chunk') {
+          // Mode 3 音訊+唇形同步（Gateway 等 MuseTalk 完成才送）
+          const frames = msg.data?.frames || [];
+          const text = msg.data?.text || '';
+          addLog('ai-video', `同步唇形+音訊: ${frames.length} 幀 "${text.slice(0,20)}"`);
+          // 音訊播放由 Rust websocket_client 處理（tts_tx 佇列）
+          // 唇形幀由 Rust websocket_client 的 tokio::spawn 處理（25fps 寫入 frame server）
         } else if (msg.type === 'avatar_frame') {
-          // MuseTalk 即時唇形動畫幀（base64 JPEG）
+          // 單幀更新（舊版相容）
           const frame = msg.data?.frame || '';
           const frameIndex = msg.data?.index ?? 0;
           const totalFrames = msg.data?.total ?? 0;
@@ -832,6 +839,9 @@ function MainApp() {
             // 同步發送到 Avatar 獨立視窗
             invoke('emit_avatar_video', { videoUrl }).catch(() => {});
           }
+        } else if (msg.type === 'pipeline_stats') {
+          const d = msg.data || {};
+          addLog('system', `延遲統計: STT=${d.stt_ms||0}ms LLM首token=${d.llm_first_token_ms||0}ms TTS=${d.tts_total_ms||0}ms(×${d.tts_segments||0}) MuseTalk=${d.musetalk_total_ms||0}ms 總計=${d.total_ms||0}ms`);
         } else if (msg.type === 'tts_status') {
           addLog('system', 'AI 正在產生語音...');
         }

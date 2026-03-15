@@ -346,6 +346,77 @@ class MuseTalkHandler:
         total_elapsed = (time.time() - total_start) * 1000
         logger.info("MuseTalk 串流生成 %d 幀, 總計=%.0fms" % (num_frames, total_elapsed))
 
+    def warmup(self):
+        """暖機：跑一次完整 pipeline（prepare_face → whisper → UNet → VAE），觸發 CUDA kernel 初始化"""
+        total_start = time.time()
+        timings = {}
+
+        try:
+            cv2 = self.cv2
+            torch = self.torch
+
+            # Step 1: 生成合成測試音訊（0.5 秒靜音，16kHz float32）
+            t0 = time.time()
+            warmup_audio = np.zeros(8000, dtype=np.float32)  # 0.5s * 16000 = 8000 samples
+            timings["synthetic_audio"] = (time.time() - t0) * 1000
+
+            # Step 2: 生成測試臉部圖片（256x256 灰色）
+            t0 = time.time()
+            test_face = np.full((256, 256, 3), 128, dtype=np.uint8)
+            _, face_bytes = cv2.imencode(".jpg", test_face)
+            face_bytes = face_bytes.tobytes()
+            timings["synthetic_face"] = (time.time() - t0) * 1000
+
+            # Step 3: prepare_face（臉部偵測 + VAE 編碼）
+            t0 = time.time()
+            try:
+                self.prepare_face("__warmup__", face_bytes)
+                timings["prepare_face"] = (time.time() - t0) * 1000
+            except Exception as e:
+                timings["prepare_face"] = "失敗: %s" % str(e)
+                logger.warning("warmup prepare_face 失敗（測試圖片無臉部，預期中）: %s" % e)
+
+            # Step 4: Whisper 特徵提取
+            t0 = time.time()
+            audio_prompts = self._extract_whisper_features(warmup_audio)
+            timings["whisper_features"] = (time.time() - t0) * 1000
+
+            # Step 5: UNet + VAE decode（跑一幀）
+            t0 = time.time()
+            if len(audio_prompts) > 0:
+                from einops import rearrange
+                # 建立假 latent（與真實相同 shape: [1, 8, 32, 32]）
+                dummy_latent = torch.zeros(1, 8, 32, 32, device="cuda", dtype=torch.float16)
+                timestep = torch.tensor([0], device="cuda")
+
+                # 取第一幀的 audio prompt
+                whisper_chunk = audio_prompts[0:1]  # [1, feat_dim, hidden_dim]
+                whisper_chunk = self.pe(whisper_chunk)
+
+                with torch.no_grad():
+                    pred = self.unet.model(
+                        dummy_latent,
+                        timestep=timestep,
+                        encoder_hidden_states=whisper_chunk
+                    ).sample
+
+                # VAE 解碼
+                decoded = self.vae.decode_latents(pred)
+                _ = decoded[0]  # 觸發計算
+            timings["unet_vae_decode"] = (time.time() - t0) * 1000
+
+            # Step 6: 清理暖機快取
+            if "__warmup__" in self.face_cache:
+                del self.face_cache["__warmup__"]
+
+            total_elapsed = (time.time() - total_start) * 1000
+            timing_str = ", ".join("%s=%.0fms" % (k, v) if isinstance(v, (int, float)) else "%s=%s" % (k, v) for k, v in timings.items())
+            logger.info("MuseTalk warmup 完成: 總計=%.0fms (%s)" % (total_elapsed, timing_str))
+
+        except Exception as e:
+            total_elapsed = (time.time() - total_start) * 1000
+            logger.error("MuseTalk warmup 失敗 (%.0fms): %s" % (total_elapsed, e))
+
     def remove_face(self, face_id: str):
         """移除臉部快取"""
         if face_id in self.face_cache:

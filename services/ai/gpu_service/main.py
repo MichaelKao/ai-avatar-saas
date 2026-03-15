@@ -73,6 +73,8 @@ async def lifespan(app: FastAPI):
         from musetalk_handler import MuseTalkHandler
         musetalk_model = MuseTalkHandler(MODEL_DIR)
         logger.info("MuseTalk 模型載入完成")
+        # 暖機：觸發 CUDA kernel 初始化，避免首次推論延遲
+        musetalk_model.warmup()
     except Exception as e:
         logger.warning(f"MuseTalk 載入失敗（可能尚未安裝）: {e}")
 

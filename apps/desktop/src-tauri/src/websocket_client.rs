@@ -153,16 +153,64 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
                                 use tauri::Emitter;
                                 app_clone.emit("ws-message", text.as_str()).ok();
                             }
+                            "tts_synced_chunk" => {
+                                // Mode 3 音訊+唇形同步：Gateway 等 MuseTalk 完成後才送
+                                // 同時播放音訊和顯示唇形幀，確保嘴巴跟聲音同步
+                                let chunk_idx = json["data"]["index"].as_i64().unwrap_or(-1);
+                                let chunk_text = json["data"]["text"].as_str().unwrap_or("").to_string();
+                                let tts_engine = json["data"]["tts_engine"].as_str().unwrap_or("").to_string();
+
+                                // 收集所有唇形幀
+                                let frames: Vec<String> = json["data"]["frames"]
+                                    .as_array()
+                                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                    .unwrap_or_default();
+
+                                // 先寫第一幀到 frame server（OBS 立刻顯示）
+                                if let Some(first_frame) = frames.first() {
+                                    crate::frame_server::update_frame_base64(first_frame).await;
+                                }
+
+                                // 入隊音訊播放
+                                if let Some(b64) = json["data"]["audio_base64"].as_str() {
+                                    let _ = tts_tx.send(TtsWork::Base64 {
+                                        data: b64.to_string(),
+                                        index: chunk_idx,
+                                        text: chunk_text.clone(),
+                                        engine: tts_engine.clone(),
+                                    }).await;
+                                } else if let Some(audio_url) = json["data"]["audio_url"].as_str() {
+                                    let _ = tts_tx.send(TtsWork::Url {
+                                        url: audio_url.to_string(),
+                                        index: chunk_idx,
+                                        text: chunk_text.clone(),
+                                        engine: tts_engine.clone(),
+                                    }).await;
+                                }
+
+                                // 啟動唇形幀動畫（25fps，跟音訊同時開始）
+                                if frames.len() > 1 {
+                                    tokio::spawn(async move {
+                                        for (i, frame) in frames.iter().enumerate() {
+                                            if i > 0 { // 第一幀已寫入
+                                                crate::frame_server::update_frame_base64(frame).await;
+                                            }
+                                            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                        }
+                                    });
+                                }
+
+                                // 通知前端
+                                use tauri::Emitter;
+                                app_clone.emit("ws-message", text.as_str()).ok();
+                            }
                             "avatar_frame" => {
-                                // MuseTalk 唇形幀 — 更新 frame server（OBS Browser Source 用）+ Tauri 事件
+                                // 單幀更新（舊版相容 / 非同步模式）
                                 if let Some(frame) = json["data"]["frame"].as_str() {
-                                    // 寫入本地 HTTP 伺服器（OBS Browser Source 會即時拉取）
                                     crate::frame_server::update_frame_base64(frame).await;
-                                    // 也發送 Tauri 事件給 AvatarWindow
                                     use tauri::Emitter;
                                     app_clone.emit("avatar-frame-update", frame).ok();
                                 }
-                                // 也發送給主視窗（UI 顯示進度）
                                 use tauri::Emitter;
                                 app_clone.emit("ws-message", text.as_str()).ok();
                             }
@@ -247,6 +295,11 @@ pub async fn set_custom_prompt(prompt: &str) {
 
 /// 發送文字訊息到 Gateway
 pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
+    send_message_with_stt_latency(text, mode, 0).await
+}
+
+/// 發送文字訊息到 Gateway（含 STT 延遲統計）
+pub async fn send_message_with_stt_latency(text: &str, mode: i32, stt_latency_ms: u128) -> Result<(), String> {
     let sender = get_sender();
     let mut guard = sender.lock().await;
 
@@ -259,6 +312,10 @@ pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
             "text": text,
             "mode": mode,
         });
+
+        if stt_latency_ms > 0 {
+            msg["stt_latency_ms"] = serde_json::Value::Number(serde_json::Number::from(stt_latency_ms as i64));
+        }
 
         if !cfg.voice_gender.is_empty() {
             msg["voice_gender"] = serde_json::Value::String(cfg.voice_gender.clone());

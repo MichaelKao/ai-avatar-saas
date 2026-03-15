@@ -203,8 +203,8 @@ async fn start_auto_mode(
                         app_clone.emit("stt-result", &text).ok();
                         app_clone.emit("debug-log", &format!("STT 完成 ({}ms): {}", stt_elapsed, &text)).ok();
 
-                        // VAD 模式：語句結束就直接送 AI，不需防抖
-                        if let Err(e) = websocket_client::send_message(&text, mode).await {
+                        // VAD 模式：語句結束就直接送 AI，不需防抖（含 STT 延遲統計）
+                        if let Err(e) = websocket_client::send_message_with_stt_latency(&text, mode, stt_elapsed).await {
                             app_clone.emit("debug-log", &format!("WebSocket 傳送失敗: {}", e)).ok();
                         }
                     } else {

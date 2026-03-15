@@ -159,32 +159,39 @@ pub async fn setup_virtual_camera(
     )
     .await?;
 
-    // 3. 移除舊的來源（如果有的話）
-    let _ = conn
-        .request("RemoveInput", json!({ "inputName": source_name }))
-        .await;
+    // 3. 嘗試建立 Browser Source（如果已存在就更新設定）
+    let browser_settings = json!({
+        "url": "http://127.0.0.1:19280",
+        "width": 640,
+        "height": 480,
+        "css": "",
+        "shutdown": false,
+        "restart_when_active": false
+    });
 
-    // 4. 建立 Browser Source（連到本地 frame server，比 window_capture 更可靠）
-    // frame server 在 http://127.0.0.1:19280 提供 MuseTalk 幀
-    conn.request(
+    let create_result = conn.request(
         "CreateInput",
         json!({
             "sceneName": scene_name,
             "inputName": source_name,
             "inputKind": "browser_source",
-            "inputSettings": {
-                "url": "http://127.0.0.1:19280",
-                "width": 640,
-                "height": 480,
-                "css": "",
-                "shutdown": false,
-                "restart_when_active": false
-            }
+            "inputSettings": browser_settings
         }),
     )
-    .await?;
+    .await;
 
-    // 5. 強制 Browser Source 重新載入（確保內容最新）
+    if create_result.is_err() {
+        // 已存在，更新設定即可
+        let _ = conn.request(
+            "SetInputSettings",
+            json!({
+                "inputName": source_name,
+                "inputSettings": browser_settings
+            }),
+        ).await;
+    }
+
+    // 4. 強制 Browser Source 重新載入（確保內容最新）
     let _ = conn
         .request(
             "PressInputPropertiesButton",
