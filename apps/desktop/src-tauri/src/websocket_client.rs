@@ -27,6 +27,7 @@ static SESSION_CONFIG: std::sync::OnceLock<Arc<Mutex<SessionConfig>>> = std::syn
 pub struct SessionConfig {
     pub voice_gender: String,
     pub face_image_base64: String,
+    pub custom_prompt: String,
 }
 
 fn get_session_config() -> &'static Arc<Mutex<SessionConfig>> {
@@ -63,23 +64,58 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
                         let msg_type = json["type"].as_str().unwrap_or("");
 
                         match msg_type {
+                            "thinking_animation" => {
+                                // 新回答開始 → 清空舊音訊佇列（避免舊回答殘留）
+                                if json["data"]["status"].as_str() == Some("start") {
+                                    audio_player::cancel_playback();
+                                    use tauri::Emitter;
+                                    app_clone.emit("debug-log", "新回答開始，清空舊音訊佇列").ok();
+                                }
+                                use tauri::Emitter;
+                                app_clone.emit("ws-message", text.as_str()).ok();
+                            }
                             "tts_audio_chunk" | "tts_audio" => {
+                                let chunk_idx = json["data"]["index"].as_i64().unwrap_or(-1);
                                 // 串流 TTS chunk：支援 base64（記憶體內）或 URL（下載）
                                 if let Some(b64) = json["data"]["audio_base64"].as_str() {
                                     // base64 模式：直接解碼，不需下載（省 ~250ms）
                                     let b64 = b64.to_string();
+                                    let app_dbg = app_clone.clone();
+                                    let idx = chunk_idx;
                                     tokio::spawn(async move {
+                                        let start = std::time::Instant::now();
                                         match decode_and_enqueue(&b64) {
-                                            Ok(_) => {}
-                                            Err(e) => eprintln!("base64 音訊入隊失敗: {}", e),
+                                            Ok(_) => {
+                                                use tauri::Emitter;
+                                                app_dbg.emit("debug-log", &format!(
+                                                    "TTS #{} base64 入隊 ({}ms, {}KB)",
+                                                    idx, start.elapsed().as_millis(), b64.len() / 1024
+                                                )).ok();
+                                            }
+                                            Err(e) => {
+                                                use tauri::Emitter;
+                                                app_dbg.emit("debug-log", &format!("TTS #{} base64 入隊失敗: {}", idx, e)).ok();
+                                            }
                                         }
                                     });
                                 } else if let Some(audio_url) = json["data"]["audio_url"].as_str() {
                                     let url = audio_url.to_string();
+                                    let app_dbg = app_clone.clone();
+                                    let idx = chunk_idx;
                                     tokio::spawn(async move {
+                                        let start = std::time::Instant::now();
                                         match download_and_enqueue(&url).await {
-                                            Ok(_) => {}
-                                            Err(e) => eprintln!("音訊 chunk 入隊失敗: {}", e),
+                                            Ok(_) => {
+                                                use tauri::Emitter;
+                                                app_dbg.emit("debug-log", &format!(
+                                                    "TTS #{} URL 下載+入隊 ({}ms)",
+                                                    idx, start.elapsed().as_millis()
+                                                )).ok();
+                                            }
+                                            Err(e) => {
+                                                use tauri::Emitter;
+                                                app_dbg.emit("debug-log", &format!("TTS #{} URL 入隊失敗: {}", idx, e)).ok();
+                                            }
                                         }
                                     });
                                 }
@@ -159,6 +195,13 @@ pub async fn set_session_config(voice_gender: &str, face_image_base64: &str) {
     guard.face_image_base64 = face_image_base64.to_string();
 }
 
+/// 設定自訂 system prompt（面試模式等場景用）
+pub async fn set_custom_prompt(prompt: &str) {
+    let config = get_session_config();
+    let mut guard = config.lock().await;
+    guard.custom_prompt = prompt.to_string();
+}
+
 /// 發送文字訊息到 Gateway
 pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
     let sender = get_sender();
@@ -181,6 +224,10 @@ pub async fn send_message(text: &str, mode: i32) -> Result<(), String> {
         if !cfg.face_image_base64.is_empty() {
             msg["face_image_base64"] = serde_json::Value::String(cfg.face_image_base64.clone());
             cfg.face_image_base64.clear();
+        }
+        // 自訂 prompt（面試模式等場景用）— 每則訊息都帶
+        if !cfg.custom_prompt.is_empty() {
+            msg["custom_prompt"] = serde_json::Value::String(cfg.custom_prompt.clone());
         }
         drop(cfg);
 

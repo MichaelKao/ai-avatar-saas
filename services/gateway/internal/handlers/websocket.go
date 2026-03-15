@@ -42,6 +42,7 @@ type TranscriptionMessage struct {
 	VoiceGender     string `json:"voice_gender,omitempty"`      // "male" 或 "female"
 	FaceImageBase64 string `json:"face_image_base64,omitempty"` // 即時 webcam 截圖
 	MsgType         string `json:"type,omitempty"`               // "interrupt" 等控制訊息
+	CustomPrompt    string `json:"custom_prompt,omitempty"`     // 自訂 prompt（面試模式等）
 }
 
 // AIServiceRequest 呼叫 AI 服務的請求
@@ -395,8 +396,6 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 		// MuseTalk 臉部預處理狀態
 		var museTalkFaceID string
 		var museTalkReady bool
-		// MuseTalk GPU 串行化：一次只處理一段，避免多 goroutine 搶 GPU
-		museTalkSem := make(chan struct{}, 1)
 
 		// 場景過渡語設定
 		var transitionEnabled bool
@@ -485,11 +484,17 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					go h.dispatchTransitionPhrase(ctx, conn, sessionID, sceneLanguage, transitionStyle, voiceGender, useCustomVoice)
 				}
 
+				// 自訂 prompt（面試模式等）— 覆蓋到 system prompt 前
+				effectivePrompt := personality.SystemPrompt
+				if latest.CustomPrompt != "" {
+					effectivePrompt = latest.CustomPrompt + "\n\n" + personality.SystemPrompt
+				}
+
 				h.processStreamingPipeline(
 					ctx, conn, httpClient, latest, sessionID, userID, activeSceneID,
-					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
+					effectivePrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
-					museTalkReady, museTalkFaceID, museTalkSem,
+					museTalkReady, museTalkFaceID,
 				)
 
 				// Pipeline 完成，清除 cancel
@@ -1250,7 +1255,6 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	useCustomVoice bool,
 	faceImageURL, sessionFaceBase64 string,
 	museTalkReady bool, museTalkFaceID string,
-	museTalkSem chan struct{},
 ) {
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
@@ -1296,12 +1300,124 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	defer resp.Body.Close()
 
 	// 讀取 SSE 串流，逐句處理
+	// 改用循序 Pipeline：LLM → sentChan → TTS（循序）→ museTalkChan → MuseTalk（循序）
+	// 保證音訊和唇形幀都按正確順序送出
 	var sentences []string
 	var fullText strings.Builder
-	var ttsWg sync.WaitGroup
 	sentenceIndex := 0
 
 	startTime := time.Now()
+
+	// MuseTalk 工作項目
+	type museTalkWork struct {
+		audioB64 string
+		audioURL string
+		index    int
+	}
+
+	// 句子 channel：LLM 串流 → 循序 TTS 消費者
+	type sentenceWork struct {
+		text  string
+		index int
+	}
+	sentChan := make(chan sentenceWork, 50)
+
+	// MuseTalk channel：TTS 完成 → 循序 MuseTalk 消費者
+	var museTalkChan chan museTalkWork
+	if msg.Mode == 3 && museTalkReady {
+		museTalkChan = make(chan museTalkWork, 50)
+	}
+
+	var pipelineWg sync.WaitGroup
+
+	// 循序 TTS 消費者（保證音訊按順序送出）
+	pipelineWg.Add(1)
+	go func() {
+		defer pipelineWg.Done()
+		if museTalkChan != nil {
+			defer close(museTalkChan)
+		}
+		for sent := range sentChan {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			var audioB64, audioURL string
+
+			if useCustomVoice {
+				u, ttsErr := callGPUTTS(sent.text, voiceID, voiceGender)
+				if ttsErr != nil || u == "" {
+					log.Printf("TTS #%d 失敗: %v", sent.index, ttsErr)
+					continue
+				}
+				audioURL = u
+				writeWSMessage(conn, WSMessage{
+					Type: "tts_audio_chunk",
+					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID},
+				})
+			} else {
+				b64, ttsErr := callMeloTTS(ctx, sent.text, voiceGender)
+				if ttsErr != nil || b64 == "" {
+					log.Printf("MeloTTS #%d 失敗: %v，回退 CosyVoice", sent.index, ttsErr)
+					u, e2 := callCosyVoiceTTS(ctx, sent.text, voiceGender)
+					if e2 != nil || u == "" {
+						log.Printf("CosyVoice #%d 也失敗: %v", sent.index, e2)
+						continue
+					}
+					audioURL = u
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID},
+					})
+				} else {
+					audioB64 = b64
+					writeWSMessage(conn, WSMessage{
+						Type: "tts_audio_chunk",
+						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID},
+					})
+				}
+			}
+
+			// 送入 MuseTalk 佇列（Mode 3 用）
+			if museTalkChan != nil && (audioB64 != "" || audioURL != "") {
+				museTalkChan <- museTalkWork{audioB64: audioB64, audioURL: audioURL, index: sent.index}
+			}
+		}
+	}()
+
+	// 循序 MuseTalk 消費者（與 TTS 並行，自己內部循序，保證幀順序）
+	if museTalkChan != nil {
+		pipelineWg.Add(1)
+		go func() {
+			defer pipelineWg.Done()
+			for work := range museTalkChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				var frames []string
+				var mtErr error
+				if work.audioB64 != "" {
+					frames, mtErr = callMuseTalkLipsyncFromBase64(museTalkFaceID, work.audioB64, 44100)
+				} else if work.audioURL != "" {
+					frames, mtErr = callMuseTalkLipsync(museTalkFaceID, work.audioURL)
+				}
+				if mtErr != nil {
+					log.Printf("MuseTalk #%d 失敗: %v", work.index, mtErr)
+					continue
+				}
+				for fi, frame := range frames {
+					writeWSMessage(conn, WSMessage{
+						Type: "avatar_frame",
+						Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sessionID},
+					})
+				}
+			}
+		}()
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -1309,10 +1425,12 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		select {
 		case <-ctx.Done():
 			log.Printf("Pipeline 被打斷")
+			close(sentChan)
 			writeWSMessage(conn, WSMessage{
 				Type: "thinking_animation",
 				Data: fiber.Map{"status": "stop"},
 			})
+			pipelineWg.Wait()
 			return
 		default:
 		}
@@ -1339,7 +1457,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 		sentences = append(sentences, sentence)
 		fullText.WriteString(sentence)
 
-		// 逐句推送文字給客戶端（用戶看到文字逐句出現）
+		// 逐句推送文字給客戶端
 		writeWSMessage(conn, WSMessage{
 			Type: "suggestion_text",
 			Data: fiber.Map{
@@ -1348,131 +1466,12 @@ func (h *WebSocketHandler) processStreamingPipeline(
 			},
 		})
 
-		// Mode 2/3: 每個句子立刻啟動串流 TTS → PCM chunks 即時推送
+		// Mode 2/3: 送入 TTS channel（循序處理）
 		if msg.Mode >= 2 {
-			ttsWg.Add(1)
-			go func(s string, i int) {
-				defer ttsWg.Done()
-
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-
-				if useCustomVoice {
-					// 自訂聲音用 CosyVoice（回傳 URL）
-					u, ttsErr := callGPUTTS(s, voiceID, voiceGender)
-					if ttsErr != nil || u == "" {
-						log.Printf("TTS 第 %d 句失敗: %v", i, ttsErr)
-						return
-					}
-					writeWSMessage(conn, WSMessage{
-						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
-					})
-					// Mode 3: 唇形動畫（MuseTalk 優先，Wav2Lip 回退）
-					if msg.Mode == 3 {
-						go func(aURL, fURL, fBase64, sid string, mtReady bool, mtFaceID string, sem chan struct{}) {
-							if mtReady {
-								// 串行化：等待 GPU 可用
-								sem <- struct{}{}
-								// MuseTalk：即時唇形動畫（~45ms/frame）
-								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
-								<-sem // 釋放 GPU
-								if mtErr != nil {
-									log.Printf("MuseTalk 失敗（回退 Wav2Lip）: %v", mtErr)
-								} else {
-									// 逐幀推送 base64 JPEG
-									for fi, frame := range frames {
-										writeWSMessage(conn, WSMessage{
-											Type: "avatar_frame",
-											Data: fiber.Map{
-												"frame":      frame,
-												"index":      fi,
-												"total":      len(frames),
-												"fps":        25,
-												"session_id": sid,
-											},
-										})
-									}
-									return
-								}
-							}
-							// Wav2Lip 回退
-							vURL, wErr := callWav2LipFromAudio(aURL, fURL, fBase64)
-							if wErr != nil {
-								log.Printf("Wav2Lip 也失敗: %v", wErr)
-								return
-							}
-							if vURL != "" {
-								writeWSMessage(conn, WSMessage{
-									Type: "avatar_video",
-									Data: fiber.Map{"video_url": vURL, "session_id": sid},
-								})
-							}
-						}(u, faceImageURL, sessionFaceBase64, sessionID, museTalkReady, museTalkFaceID, museTalkSem)
-					}
-				} else {
-					// 預設聲音用 MeloTTS（記憶體內，回傳 base64）
-					b64, ttsErr := callMeloTTS(ctx, s, voiceGender)
-					if ttsErr != nil || b64 == "" {
-						log.Printf("MeloTTS 第 %d 句失敗: %v，回退 CosyVoice", i, ttsErr)
-						u, ttsErr := callCosyVoiceTTS(ctx, s, voiceGender)
-						if ttsErr != nil || u == "" {
-							log.Printf("CosyVoice 也失敗: %v", ttsErr)
-							return
-						}
-						writeWSMessage(conn, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_url": u, "index": i, "session_id": sessionID},
-						})
-						// Mode 3: CosyVoice 回退也觸發 MuseTalk
-						if msg.Mode == 3 && museTalkReady {
-							go func(aURL, sid, mtFaceID string, sem chan struct{}) {
-								sem <- struct{}{} // 串行化
-								frames, mtErr := callMuseTalkLipsync(mtFaceID, aURL)
-								<-sem // 釋放 GPU
-								if mtErr != nil {
-									log.Printf("MuseTalk(CosyVoice) 失敗: %v", mtErr)
-									return
-								}
-								for fi, frame := range frames {
-									writeWSMessage(conn, WSMessage{
-										Type: "avatar_frame",
-										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
-									})
-								}
-							}(u, sessionID, museTalkFaceID, museTalkSem)
-						}
-					} else {
-						writeWSMessage(conn, WSMessage{
-							Type: "tts_audio_chunk",
-							Data: fiber.Map{"audio_base64": b64, "index": i, "session_id": sessionID},
-						})
-						// Mode 3: MeloTTS base64 音訊也觸發 MuseTalk
-						if msg.Mode == 3 && museTalkReady {
-							go func(audioB64, sid, mtFaceID string, sem chan struct{}) {
-								sem <- struct{}{} // 串行化
-								frames, mtErr := callMuseTalkLipsyncFromBase64(mtFaceID, audioB64, 44100)
-								<-sem // 釋放 GPU
-								if mtErr != nil {
-									log.Printf("MuseTalk(MeloTTS) 失敗: %v", mtErr)
-									return
-								}
-								for fi, frame := range frames {
-									writeWSMessage(conn, WSMessage{
-										Type: "avatar_frame",
-										Data: fiber.Map{"frame": frame, "index": fi, "total": len(frames), "fps": 25, "session_id": sid},
-									})
-								}
-							}(b64, sessionID, museTalkFaceID, museTalkSem)
-						}
-					}
-				}
-			}(sentence, idx)
+			sentChan <- sentenceWork{text: sentence, index: idx}
 		}
 	}
+	close(sentChan)
 
 	llmElapsed := time.Since(startTime)
 
@@ -1486,6 +1485,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	finalText := fullText.String()
 	if finalText == "" {
 		writeWSMessage(conn, WSMessage{Type: "error", Data: "AI 無回覆"})
+		pipelineWg.Wait()
 		return
 	}
 
@@ -1499,16 +1499,16 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 	log.Printf("串流 LLM 完成: %d 句, %dms", len(sentences), llmElapsed.Milliseconds())
 
-	// 等待所有 TTS goroutine 完成
-	if msg.Mode >= 2 {
-		ttsWg.Wait()
+	// 等待 TTS + MuseTalk 全部完成
+	pipelineWg.Wait()
 
-		// 發送串流結束信號
+	// 發送串流結束信號
+	if msg.Mode >= 2 {
 		writeWSMessage(conn, WSMessage{
 			Type: "tts_stream_end",
 			Data: fiber.Map{
-				"session_id":    sessionID,
-				"total_chunks":  len(sentences),
+				"session_id":   sessionID,
+				"total_chunks": len(sentences),
 			},
 		})
 	}

@@ -80,11 +80,20 @@ function AvatarWindow() {
   const avatarRef = useRef<HTMLVideoElement | null>(null);
   const [showAvatar, setShowAvatar] = useState(false);
   const [faceSnapshot, setFaceSnapshot] = useState('');
+  const [currentFrame, setCurrentFrame] = useState('');
 
   // 接收臉部截圖（webcam 不可用時的備用畫面）
   useEffect(() => {
     const unlisten = listen<string>('avatar-face-snapshot', (event) => {
       if (event.payload) setFaceSnapshot(event.payload);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  // 接收 MuseTalk 即時唇形幀（base64 JPEG）
+  useEffect(() => {
+    const unlisten = listen<string>('avatar-frame-update', (event) => {
+      if (event.payload) setCurrentFrame(event.payload);
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
@@ -126,7 +135,7 @@ function AvatarWindow() {
 
   return (
     <div style={containerStyle}>
-      {/* 底層：啟動時擷取的臉部截圖（穩定可靠，不受攝影機停用影響） */}
+      {/* 底層：啟動時擷取的臉部截圖 */}
       {faceSnapshot && (
         <img
           src={`data:image/jpeg;base64,${faceSnapshot}`}
@@ -134,7 +143,15 @@ function AvatarWindow() {
           alt=""
         />
       )}
-      {/* 頂層：Wav2Lip AI 影片（AI 回應時蓋住 webcam） */}
+      {/* MuseTalk 即時唇形幀（蓋住靜態截圖） */}
+      {currentFrame && (
+        <img
+          src={`data:image/jpeg;base64,${currentFrame}`}
+          style={{ ...fullCover, zIndex: 5 }}
+          alt=""
+        />
+      )}
+      {/* Wav2Lip 影片（最上層） */}
       <video
         ref={avatarRef}
         style={{ ...fullCover, display: showAvatar ? 'block' : 'none', zIndex: 10 }}
@@ -143,7 +160,7 @@ function AvatarWindow() {
         onError={handleAvatarEnded}
       />
       {/* 無任何畫面時顯示提示 */}
-      {!faceSnapshot && (
+      {!faceSnapshot && !currentFrame && (
         <div style={{
           ...fullCover, display: 'flex', alignItems: 'center', justifyContent: 'center',
           color: '#475569', fontSize: 14, textAlign: 'center',
@@ -599,6 +616,10 @@ function MainApp() {
   // 手動文字輸入（除錯用）
   const [manualText, setManualText] = useState('');
 
+  // 面試模式
+  const [interviewMode, setInterviewMode] = useState(() => localStorage.getItem('interviewMode') === 'true');
+  const [interviewPosition, setInterviewPosition] = useState(() => localStorage.getItem('interviewPosition') || 'Java Senior Engineer');
+
   // 連線狀態指示燈
   const [healthStatus, setHealthStatus] = useState<{ gateway: boolean | null; gpu: boolean | null }>({ gateway: null, gpu: null });
 
@@ -616,8 +637,10 @@ function MainApp() {
     localStorage.setItem('mode', mode.toString());
     localStorage.setItem('voiceGender', voiceGender);
     localStorage.setItem('sttMode', sttMode);
+    localStorage.setItem('interviewMode', interviewMode.toString());
+    localStorage.setItem('interviewPosition', interviewPosition);
     if (activeSceneId) localStorage.setItem('activeSceneId', activeSceneId);
-  }, [apiUrl, gpuUrl, mode, voiceGender, sttMode, activeSceneId]);
+  }, [apiUrl, gpuUrl, mode, voiceGender, sttMode, activeSceneId, interviewMode, interviewPosition]);
 
   useEffect(() => {
     if (token) localStorage.setItem('token', token);
@@ -627,6 +650,16 @@ function MainApp() {
   useEffect(() => {
     localStorage.setItem('setupDone', setupDone ? 'true' : 'false');
   }, [setupDone]);
+
+  // 面試模式 → 設定自訂 prompt
+  useEffect(() => {
+    if (interviewMode && interviewPosition) {
+      const prompt = `你是一位正在面試的候選人。職位: ${interviewPosition}。\n回答風格: 專業、有自信、舉實際專案經驗的例子。\n請用該職位候選人的身份回答面試問題，展現深入的技術理解。`;
+      invoke('set_custom_prompt', { prompt }).catch(() => {});
+    } else {
+      invoke('set_custom_prompt', { prompt: '' }).catch(() => {});
+    }
+  }, [interviewMode, interviewPosition]);
 
   // -----------------------------------------------------------------------
   // 連線健康檢查（進入主畫面後定期檢查）
@@ -1255,6 +1288,40 @@ function MainApp() {
               </div>
             </div>
           )}
+
+          {/* 面試模式 */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 600, opacity: 0.7, marginBottom: 4 }}>
+              場景模式
+            </label>
+            <button onClick={() => setInterviewMode(!interviewMode)} style={{
+              width: '100%',
+              padding: '8px 0',
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              border: `2px solid ${interviewMode ? '#f97316' : (dark ? '#475569' : '#cbd5e1')}`,
+              background: interviewMode ? 'rgba(249,115,22,0.2)' : 'transparent',
+              color: interviewMode ? '#fb923c' : (dark ? '#94a3b8' : '#64748b'),
+              marginBottom: 6,
+            }}>
+              面試模式 {interviewMode ? 'ON' : 'OFF'}
+            </button>
+            {interviewMode && (
+              <>
+                <input
+                  value={interviewPosition}
+                  onChange={e => setInterviewPosition(e.target.value)}
+                  placeholder="職位（如：Java Senior Engineer）"
+                  style={inputStyle(dark)}
+                />
+                <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
+                  AI 會以該職位候選人身份回答面試問題，展現專業自信
+                </div>
+              </>
+            )}
+          </div>
 
           {/* 場景選擇 */}
           {scenes.length > 0 && (

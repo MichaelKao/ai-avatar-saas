@@ -41,6 +41,7 @@ fn main() {
             ensure_obs_ready,
             cleanup_obs,
             set_voice_and_face,
+            set_custom_prompt,
             auto_set_default_mic,
             restore_default_mic,
             auto_disable_real_cameras,
@@ -767,6 +768,13 @@ async fn emit_avatar_video(app: tauri::AppHandle, video_url: String) -> Result<(
     use tauri::Emitter;
     app.emit_to("avatar", "avatar-video-update", &video_url)
         .map_err(|e| format!("發送失敗: {}", e))?;
+    Ok(())
+}
+
+/// 設定自訂 system prompt（面試模式等場景用）
+#[tauri::command]
+async fn set_custom_prompt(prompt: String) -> Result<(), String> {
+    websocket_client::set_custom_prompt(&prompt).await;
     Ok(())
 }
 

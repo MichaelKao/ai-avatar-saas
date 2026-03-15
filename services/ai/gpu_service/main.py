@@ -95,7 +95,10 @@ async def lifespan(app: FastAPI):
         compute = "int8_float16" if WHISPER_MODEL_SIZE == "large-v3" else "float16"
         logger.info(f"Loading Whisper {WHISPER_MODEL_SIZE} (compute={compute})...")
         whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type=compute)
-        logger.info(f"Whisper {WHISPER_MODEL_SIZE} 載入完成")
+        # 暖機：首次推論會觸發 CUDA kernel 初始化（~5-10s），提前做完避免首次 STT 超時
+        warmup_audio = np.zeros(16000, dtype=np.float32)  # 1 秒靜音
+        list(whisper_model.transcribe(warmup_audio, beam_size=5, vad_filter=False)[0])
+        logger.info(f"Whisper {WHISPER_MODEL_SIZE} 載入 + 暖機完成")
     except Exception as e:
         logger.warning(f"Whisper 載入失敗: {e}")
 
