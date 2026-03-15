@@ -489,7 +489,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					ctx, conn, httpClient, latest, sessionID, userID, activeSceneID,
 					personality.SystemPrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
-					museTalkReady, museTalkFaceID,
+					museTalkReady, museTalkFaceID, museTalkSem,
 				)
 
 				// Pipeline 完成，清除 cancel
@@ -1250,6 +1250,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	useCustomVoice bool,
 	faceImageURL, sessionFaceBase64 string,
 	museTalkReady bool, museTalkFaceID string,
+	museTalkSem chan struct{},
 ) {
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
