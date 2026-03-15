@@ -843,6 +843,7 @@ async def models_status():
     return {
         "data": {
             "cosyvoice": {"loaded": cosyvoice_model is not None},
+            "melotts": {"loaded": melotts_model is not None},
             "wav2lip": {"loaded": wav2lip_model is not None},
             "musetalk": {"loaded": musetalk_model is not None},
             "whisper": {
