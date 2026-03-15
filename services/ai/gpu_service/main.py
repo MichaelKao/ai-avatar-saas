@@ -708,61 +708,123 @@ async def prepare_face(request: PrepareFaceRequest):
 
 class StreamLipsyncRequest(BaseModel):
     face_id: str
-    audio_url: str  # 音訊檔案相對路徑
+    audio_url: Optional[str] = None  # 音訊檔案相對路徑（二擇一）
+    audio_base64: Optional[str] = None  # base64 WAV/PCM 音訊（二擇一）
+    sample_rate: int = 16000  # PCM 取樣率
 
 
 @app.post("/api/v1/avatar/stream-lipsync")
 async def stream_lipsync(request: StreamLipsyncRequest):
-    """串流唇形動畫 — 回傳 MJPEG 串流
-    每幀 30-50ms 生成，適合即時顯示
+    """MuseTalk 唇形動畫 — 回傳 MJPEG 串流
+    接受 audio_url 或 audio_base64，生成所有唇形幀（~38ms/frame）
     """
     if musetalk_model is None:
         raise HTTPException(503, "MuseTalk 模型未載入")
 
-    # 解析音訊路徑
-    audio_relative = request.audio_url.lstrip("/")
-    if audio_relative.startswith("outputs/"):
-        audio_relative = audio_relative[len("outputs/"):]
-    audio_path = OUTPUT_DIR / audio_relative
+    # 取得音訊 bytes
+    if request.audio_base64:
+        audio_bytes = base64.b64decode(request.audio_base64)
+    elif request.audio_url:
+        audio_relative = request.audio_url.lstrip("/")
+        if audio_relative.startswith("outputs/"):
+            audio_relative = audio_relative[len("outputs/"):]
+        audio_path = OUTPUT_DIR / audio_relative
+        if not audio_path.exists():
+            raise HTTPException(404, f"音訊檔案不存在: {request.audio_url}")
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+    else:
+        raise HTTPException(400, "需提供 audio_url 或 audio_base64")
 
-    if not audio_path.exists():
-        raise HTTPException(404, f"音訊檔案不存在: {request.audio_url}")
-
-    # 讀取音訊，切成 ~33ms chunks（每幀 30fps）
-    import wave
+    # 確認 face_id 已預處理
+    if request.face_id not in musetalk_model.face_cache:
+        raise HTTPException(400, f"face_id '{request.face_id}' 未預處理，請先呼叫 /api/v1/avatar/prepare-face")
 
     try:
-        with wave.open(str(audio_path), "rb") as wf:
-            sr = wf.getframerate()
-            audio_bytes = wf.readframes(wf.getnframes())
-    except Exception:
-        # 非標準 WAV，用 numpy 讀
-        audio_data = np.fromfile(str(audio_path), dtype=np.int16)
-        audio_bytes = audio_data.tobytes()
-        sr = 16000  # 假設 16kHz
-
-    # 切成每幀 ~33ms 的 chunks
-    frame_samples = int(sr * 0.033)  # 30fps
-    frame_bytes = frame_samples * 2  # 16bit
-
-    def audio_chunks():
-        for i in range(0, len(audio_bytes), frame_bytes):
-            yield audio_bytes[i : i + frame_bytes]
-
-    async def generate():
-        for jpeg_frame in musetalk_model.generate_frames_stream(
-            request.face_id, audio_chunks()
-        ):
-            # MJPEG 格式：每幀以 boundary 分隔
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + jpeg_frame + b"\r\n"
+        import asyncio
+        loop = asyncio.get_event_loop()
+        # MuseTalk 生成所有幀（GPU 推論，在 executor 中執行避免阻塞）
+        frames = await loop.run_in_executor(
+            None,
+            lambda: musetalk_model.generate_frames_from_audio(
+                request.face_id, audio_bytes, request.sample_rate
             )
+        )
 
-    return StreamingResponse(
-        generate(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+        async def generate():
+            for jpeg_frame in frames:
+                # MJPEG 格式：每幀以 boundary 分隔
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg_frame + b"\r\n"
+                )
+
+        return StreamingResponse(
+            generate(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"X-Frame-Count": str(len(frames))},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"MuseTalk 唇形動畫失敗: {e}")
+        raise HTTPException(500, f"唇形動畫失敗: {str(e)}")
+
+
+class MuseTalkLipsyncRequest(BaseModel):
+    """MuseTalk 唇形動畫（JSON frames 回傳，適合 WebSocket 整合）"""
+    face_id: str
+    audio_base64: str  # base64 WAV 音訊
+    sample_rate: int = 16000
+
+
+@app.post("/api/v1/avatar/musetalk-lipsync")
+async def musetalk_lipsync(request: MuseTalkLipsyncRequest):
+    """MuseTalk 唇形動畫 — 回傳 base64 JPEG frames 陣列
+    適合 Gateway WebSocket 整合：一次拿到所有幀，逐幀推送給 client
+    """
+    if musetalk_model is None:
+        raise HTTPException(503, "MuseTalk 模型未載入")
+
+    if request.face_id not in musetalk_model.face_cache:
+        raise HTTPException(400, f"face_id '{request.face_id}' 未預處理")
+
+    try:
+        import asyncio
+        audio_bytes = base64.b64decode(request.audio_base64)
+        loop = asyncio.get_event_loop()
+        frames = await loop.run_in_executor(
+            None,
+            lambda: musetalk_model.generate_frames_from_audio(
+                request.face_id, audio_bytes, request.sample_rate
+            )
+        )
+
+        # 將 JPEG frames 轉為 base64
+        frames_b64 = [base64.b64encode(f).decode() for f in frames]
+
+        return {
+            "data": {
+                "frame_count": len(frames_b64),
+                "frames": frames_b64,
+                "fps": 25,
+            },
+            "error": None,
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"MuseTalk 唇形動畫失敗: {e}")
+        raise HTTPException(500, f"唇形動畫失敗: {str(e)}")
+
+
+@app.delete("/api/v1/avatar/face/{face_id}")
+async def remove_face(face_id: str):
+    """移除臉部快取"""
+    if musetalk_model is None:
+        raise HTTPException(503, "MuseTalk 模型未載入")
+    musetalk_model.remove_face(face_id)
+    return {"data": {"removed": face_id}, "error": None}
 
 
 # ============== 模型管理 ==============
