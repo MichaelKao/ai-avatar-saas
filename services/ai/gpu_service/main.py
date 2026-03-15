@@ -744,19 +744,31 @@ async def stream_lipsync(request: StreamLipsyncRequest):
         raise HTTPException(400, f"face_id '{request.face_id}' 未預處理，請先呼叫 /api/v1/avatar/prepare-face")
 
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        # MuseTalk 生成所有幀（GPU 推論，在 executor 中執行避免阻塞）
-        frames = await loop.run_in_executor(
-            None,
-            lambda: musetalk_model.generate_frames_from_audio(
-                request.face_id, audio_bytes, request.sample_rate
-            )
-        )
+        import asyncio, queue, threading
+        frame_queue = queue.Queue()
+
+        # 在背景執行緒串流生成幀（GPU 推論不能在 async 中直接跑）
+        def _generate_in_thread():
+            try:
+                for jpeg_frame in musetalk_model.generate_frames_streaming(
+                    request.face_id, audio_bytes, request.sample_rate
+                ):
+                    frame_queue.put(jpeg_frame)
+            except Exception as e:
+                logger.error(f"MuseTalk 串流生成失敗: {e}")
+            finally:
+                frame_queue.put(None)  # 結束信號
+
+        thread = threading.Thread(target=_generate_in_thread, daemon=True)
+        thread.start()
 
         async def generate():
-            for jpeg_frame in frames:
-                # MJPEG 格式：每幀以 boundary 分隔
+            loop = asyncio.get_event_loop()
+            while True:
+                # 非阻塞等待下一幀
+                jpeg_frame = await loop.run_in_executor(None, frame_queue.get)
+                if jpeg_frame is None:
+                    break
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + jpeg_frame + b"\r\n"
@@ -765,7 +777,6 @@ async def stream_lipsync(request: StreamLipsyncRequest):
         return StreamingResponse(
             generate(),
             media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={"X-Frame-Count": str(len(frames))},
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

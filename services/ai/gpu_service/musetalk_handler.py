@@ -142,6 +142,93 @@ class MuseTalkHandler:
 
         return {"face_id": face_id, "bbox": [int(x1), int(y1), int(x2), int(y2)]}
 
+    def _audio_bytes_to_numpy(self, audio_bytes: bytes, sample_rate: int) -> np.ndarray:
+        """音訊 bytes → 16kHz float32 numpy（記憶體內，不寫檔）"""
+        import soundfile as sf
+        import librosa
+
+        if audio_bytes[:4] == b"RIFF":
+            # WAV 格式 — 用 soundfile 直接從記憶體讀取
+            audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+            if len(audio_np.shape) > 1:
+                audio_np = audio_np.mean(axis=1)  # stereo → mono
+            if sr != 16000:
+                audio_np = librosa.resample(audio_np, orig_sr=sr, target_sr=16000)
+        else:
+            # Raw PCM 16bit mono
+            audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            if sample_rate != 16000:
+                import librosa
+                audio_np = librosa.resample(audio_np, orig_sr=sample_rate, target_sr=16000)
+        return audio_np
+
+    def _extract_whisper_features(self, audio_np: np.ndarray) -> list:
+        """從 numpy 音訊提取 whisper 特徵（記憶體內，不寫臨時檔）"""
+        import math
+        from einops import rearrange
+        torch = self.torch
+
+        t0 = time.time()
+
+        # Mel-spectrogram 特徵（Whisper feature extractor）
+        # 注意：feature_extractor 會自動 pad 到 30 秒
+        input_features = self.audio_processor.feature_extractor(
+            audio_np, return_tensors="pt", sampling_rate=16000
+        ).input_features.to(dtype=torch.float16)
+
+        t1 = time.time()
+
+        # Whisper encoder（最耗時的步驟）
+        input_features = input_features.to("cuda")
+        with torch.no_grad():
+            audio_feats = self.whisper.encoder(
+                input_features, output_hidden_states=True
+            ).hidden_states
+            audio_feats = torch.stack(audio_feats, dim=2)  # [1, 1500, layers, dim]
+
+        t2 = time.time()
+
+        # 計算實際幀數和裁切
+        sr = 16000
+        audio_fps = 50
+        fps = 25
+        whisper_idx_multiplier = audio_fps / fps
+        librosa_length = len(audio_np)
+        num_frames = math.floor((librosa_length / sr) * fps)
+        actual_length = math.floor((librosa_length / sr) * audio_fps)
+        audio_feats = audio_feats[:, :actual_length, ...]
+
+        # Padding
+        audio_padding_length_left = 2
+        audio_padding_length_right = 2
+        audio_feature_length_per_frame = 2 * (audio_padding_length_left + audio_padding_length_right + 1)
+        padding_nums = math.ceil(whisper_idx_multiplier)
+        audio_feats = torch.cat([
+            torch.zeros_like(audio_feats[:, :padding_nums * audio_padding_length_left]),
+            audio_feats,
+            torch.zeros_like(audio_feats[:, :padding_nums * 3 * audio_padding_length_right])
+        ], 1)
+
+        # 切分為每幀的 audio prompt
+        audio_prompts = []
+        for frame_index in range(num_frames):
+            audio_index = math.floor(frame_index * whisper_idx_multiplier)
+            audio_clip = audio_feats[:, audio_index: audio_index + audio_feature_length_per_frame]
+            if audio_clip.shape[1] == audio_feature_length_per_frame:
+                audio_prompts.append(audio_clip)
+
+        if audio_prompts:
+            audio_prompts = torch.cat(audio_prompts, dim=0)
+            audio_prompts = rearrange(audio_prompts, 'b c h w -> b (c h) w')
+        else:
+            audio_prompts = torch.zeros(0)
+
+        t3 = time.time()
+        logger.info("Whisper 特徵: mel=%.0fms, encoder=%.0fms, chunk=%.0fms, 共 %d 幀" % (
+            (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000, len(audio_prompts)))
+
+        return audio_prompts
+
     def generate_frames_from_audio(self, face_id: str, audio_bytes: bytes, sample_rate: int = 16000) -> list:
         """從完整音訊生成所有唇形動畫幀
 
@@ -150,47 +237,24 @@ class MuseTalkHandler:
         """
         cv2 = self.cv2
         torch = self.torch
+        total_start = time.time()
 
         face_info = self.face_cache.get(face_id)
         if face_info is None:
             raise ValueError("找不到臉部快取: %s" % face_id)
 
-        # 將音訊存為臨時 WAV 檔
-        tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        try:
-            # 如果是 raw PCM，加上 WAV header
-            if not audio_bytes[:4] == b"RIFF":
-                import struct
-                num_samples = len(audio_bytes) // 2  # 16bit
-                wav_header = struct.pack(
-                    '<4sI4s4sIHHIIHH4sI',
-                    b'RIFF', 36 + len(audio_bytes), b'WAVE',
-                    b'fmt ', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16,
-                    b'data', len(audio_bytes)
-                )
-                tmp_wav.write(wav_header + audio_bytes)
-            else:
-                tmp_wav.write(audio_bytes)
-            tmp_wav.flush()
-            tmp_wav_path = tmp_wav.name
-        finally:
-            tmp_wav.close()
+        # 音訊 → numpy（記憶體內，不寫臨時檔）
+        t0 = time.time()
+        audio_np = self._audio_bytes_to_numpy(audio_bytes, sample_rate)
+        t1 = time.time()
+        logger.info("音訊解碼: %.0fms (%.1f 秒音訊)" % ((t1 - t0) * 1000, len(audio_np) / 16000))
 
-        try:
-            # 提取音訊 whisper 特徵
-            whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
-                tmp_wav_path, weight_dtype=torch.float16
-            )
-            whisper_chunks = self.audio_processor.get_whisper_chunk(
-                whisper_input_features,
-                device="cuda",
-                weight_dtype=torch.float16,
-                whisper=self.whisper,
-                librosa_length=librosa_length,
-                fps=25,
-            )
-        finally:
-            os.unlink(tmp_wav_path)
+        # Whisper 特徵提取（記憶體內）
+        whisper_chunks = self._extract_whisper_features(audio_np)
+
+        if len(whisper_chunks) == 0:
+            logger.warning("Whisper 特徵為空，音訊太短？")
+            return []
 
         # 生成每一幀
         frames = []
@@ -201,6 +265,9 @@ class MuseTalkHandler:
         crop_box = face_info["crop_box"]
 
         x1, y1, x2, y2 = coord
+        # 預先計算常用 tensor
+        timestep = torch.tensor([0], device="cuda")
+
         gen_start = time.time()
 
         for i, whisper_chunk in enumerate(whisper_chunks):
@@ -210,7 +277,7 @@ class MuseTalkHandler:
             with torch.no_grad():
                 pred = self.unet.model(
                     latent,
-                    timestep=torch.tensor([0]).to("cuda"),
+                    timestep=timestep,
                     encoder_hidden_states=whisper_chunk
                 ).sample
 
@@ -229,11 +296,55 @@ class MuseTalkHandler:
             frames.append(jpeg.tobytes())
 
         gen_elapsed = (time.time() - gen_start) * 1000
+        total_elapsed = (time.time() - total_start) * 1000
         if len(frames) > 0:
-            logger.info("MuseTalk 生成 %d 幀, 總耗時 %.0fms, 平均 %.1fms/幀" % (
-                len(frames), gen_elapsed, gen_elapsed / len(frames)))
+            logger.info("MuseTalk 生成 %d 幀: GPU=%.0fms (%.1fms/幀), 總計=%.0fms" % (
+                len(frames), gen_elapsed, gen_elapsed / len(frames), total_elapsed))
 
         return frames
+
+    def generate_frames_streaming(self, face_id: str, audio_bytes: bytes, sample_rate: int = 16000):
+        """串流版本 — yield 每一幀 JPEG bytes（邊生成邊回傳）
+        前幾幀可以更快送出，不用等全部完成
+        """
+        cv2 = self.cv2
+        torch = self.torch
+        total_start = time.time()
+
+        face_info = self.face_cache.get(face_id)
+        if face_info is None:
+            raise ValueError("找不到臉部快取: %s" % face_id)
+
+        audio_np = self._audio_bytes_to_numpy(audio_bytes, sample_rate)
+        whisper_chunks = self._extract_whisper_features(audio_np)
+
+        if len(whisper_chunks) == 0:
+            return
+
+        latent = face_info["latent"]
+        frame = face_info["frame"]
+        coord = face_info["coord"]
+        mask = face_info["mask"]
+        crop_box = face_info["crop_box"]
+        x1, y1, x2, y2 = coord
+        timestep = torch.tensor([0], device="cuda")
+        num_frames = len(whisper_chunks)
+
+        for i, whisper_chunk in enumerate(whisper_chunks):
+            whisper_chunk = self.pe(whisper_chunk.unsqueeze(0))
+            with torch.no_grad():
+                pred = self.unet.model(
+                    latent, timestep=timestep, encoder_hidden_states=whisper_chunk
+                ).sample
+            decoded = self.vae.decode_latents(pred)
+            pred_face = decoded[0]
+            pred_resized = cv2.resize(pred_face, (x2 - x1, y2 - y1))
+            result = self.get_image_blending(frame.copy(), pred_resized, coord, mask, crop_box)
+            _, jpeg = cv2.imencode(".jpg", result, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            yield jpeg.tobytes()
+
+        total_elapsed = (time.time() - total_start) * 1000
+        logger.info("MuseTalk 串流生成 %d 幀, 總計=%.0fms" % (num_frames, total_elapsed))
 
     def remove_face(self, face_id: str):
         """移除臉部快取"""
