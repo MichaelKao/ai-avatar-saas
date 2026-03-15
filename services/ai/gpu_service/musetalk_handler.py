@@ -140,7 +140,7 @@ class MuseTalkHandler:
         except:
             pass
 
-        return {"face_id": face_id, "bbox": [x1, y1, x2, y2]}
+        return {"face_id": face_id, "bbox": [int(x1), int(y1), int(x2), int(y2)]}
 
     def generate_frames_from_audio(self, face_id: str, audio_bytes: bytes, sample_rate: int = 16000) -> list:
         """從完整音訊生成所有唇形動畫幀
@@ -204,8 +204,8 @@ class MuseTalkHandler:
         gen_start = time.time()
 
         for i, whisper_chunk in enumerate(whisper_chunks):
-            # 加位置編碼
-            whisper_chunk = self.pe(whisper_chunk)
+            # 加位置編碼（需要 3D: batch, seq_len, d_model）
+            whisper_chunk = self.pe(whisper_chunk.unsqueeze(0))
 
             with torch.no_grad():
                 pred = self.unet.model(
