@@ -23,13 +23,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 繁體中文語音對照表
 VOICE_MAP = {
-    "female": "zh-TW-HsiaoChenNeural",  # 台灣女聲
-    "male": "zh-TW-YunJheNeural",        # 台灣男聲
+    "female": "zh-TW-HsiaoYuNeural",   # 台灣女聲（清晰）
+    "male": "zh-TW-YunJheNeural",       # 台灣男聲（清晰）
 }
 
 # 支援的語音清單（方便日後擴充）
 SUPPORTED_VOICES = {
-    "zh-TW-HsiaoChenNeural": {"gender": "female", "language": "zh-TW", "description": "台灣繁體中文女聲"},
+    "zh-TW-HsiaoYuNeural": {"gender": "female", "language": "zh-TW", "description": "台灣繁體中文女聲"},
     "zh-TW-YunJheNeural": {"gender": "male", "language": "zh-TW", "description": "台灣繁體中文男聲"},
 }
 

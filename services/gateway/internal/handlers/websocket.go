@@ -393,9 +393,10 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 
 		// 每個連線記住 face_image_base64（只需傳送一次）
 		var sessionFaceBase64 string
-		// MuseTalk 臉部預處理狀態
+		// MuseTalk 臉部預處理狀態（channel 同步，避免 race condition）
 		var museTalkFaceID string
-		var museTalkReady bool
+		museTalkReadyCh := make(chan struct{})
+		museTalkPrepareOK := new(bool) // 指標，goroutine 設值 + close channel → happens-before 讀取
 
 		// 場景過渡語設定
 		var transitionEnabled bool
@@ -494,7 +495,7 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 					ctx, conn, httpClient, latest, sessionID, userID, activeSceneID,
 					effectivePrompt, personality.LLMModel, personality.Temperature, personality.Language,
 					voiceGender, voiceID, useCustomVoice, faceImageURL, sessionFaceBase64,
-					museTalkReady, museTalkFaceID,
+					museTalkReadyCh, museTalkPrepareOK, museTalkFaceID,
 				)
 
 				// Pipeline 完成，清除 cancel
@@ -545,15 +546,16 @@ func (h *WebSocketHandler) HandleSession() fiber.Handler {
 			if msg.FaceImageBase64 != "" {
 				sessionFaceBase64 = msg.FaceImageBase64
 				// MuseTalk: 預處理臉部（一次性，~2秒）
-				if !museTalkReady {
+				if museTalkFaceID == "" {
 					museTalkFaceID = sessionID
 					go func(fid, fb64 string) {
 						if err := callMuseTalkPrepareFace(fid, fb64); err != nil {
 							log.Printf("MuseTalk prepare-face 失敗（將回退 Wav2Lip）: %v", err)
 						} else {
-							museTalkReady = true
+							*museTalkPrepareOK = true
 							log.Printf("MuseTalk 臉部預處理完成: %s", fid)
 						}
+						close(museTalkReadyCh) // 通知等待者（成功或失敗都關閉）
 					}(museTalkFaceID, msg.FaceImageBase64)
 				}
 			}
@@ -1023,6 +1025,54 @@ func callEdgeTTS(ctx context.Context, text, voiceGender string) (string, error) 
 	return gpuPublicURL() + gpuResp.Data.AudioURL, nil
 }
 
+// callEdgeTTSBase64 呼叫 Edge TTS，從 localhost 下載音訊後轉為 base64 WAV
+// 避免客戶端從外部 URL 下載（省 1-2 秒網路延遲）
+func callEdgeTTSBase64(ctx context.Context, text, voiceGender string) (string, error) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_gender": voiceGender,
+	})
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/fast-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Edge TTS 請求失敗: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Edge TTS 錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var gpuResp GPUResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gpuResp); err != nil {
+		return "", fmt.Errorf("解析 Edge TTS 回應失敗: %w", err)
+	}
+
+	if gpuResp.Data.AudioURL == "" {
+		return "", fmt.Errorf("Edge TTS 回傳空 URL")
+	}
+
+	// 從 localhost 下載音訊檔（同機，幾乎零延遲）
+	audioReq, _ := http.NewRequestWithContext(ctx, "GET", gpuInternalURL()+gpuResp.Data.AudioURL, nil)
+	audioResp, err := client.Do(audioReq)
+	if err != nil {
+		return "", fmt.Errorf("下載 Edge TTS 音訊失敗: %w", err)
+	}
+	defer audioResp.Body.Close()
+
+	wavData, err := io.ReadAll(audioResp.Body)
+	if err != nil || len(wavData) == 0 {
+		return "", fmt.Errorf("讀取 Edge TTS 音訊失敗: %v (len=%d)", err, len(wavData))
+	}
+
+	return base64.StdEncoding.EncodeToString(wavData), nil
+}
+
 // callMeloTTS 呼叫 MeloTTS 記憶體內語音合成，回傳 base64 WAV（零 file I/O）
 func callMeloTTS(ctx context.Context, text, voiceGender string) (string, error) {
 	reqBody, _ := json.Marshal(map[string]string{
@@ -1349,7 +1399,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	voiceGender, voiceID string,
 	useCustomVoice bool,
 	faceImageURL, sessionFaceBase64 string,
-	museTalkReady bool, museTalkFaceID string,
+	museTalkReadyCh <-chan struct{}, museTalkPrepareOK *bool, museTalkFaceID string,
 ) {
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
@@ -1421,9 +1471,22 @@ func (h *WebSocketHandler) processStreamingPipeline(
 	sentChan := make(chan sentenceWork, 50)
 
 	// MuseTalk channel：TTS 完成 → 循序 MuseTalk 消費者
+	// Mode 3 時等待 prepare-face 完成（最多 5 秒），避免 race condition
 	var museTalkChan chan museTalkWork
-	if msg.Mode == 3 && museTalkReady {
-		museTalkChan = make(chan museTalkWork, 50)
+	if msg.Mode == 3 && museTalkFaceID != "" {
+		select {
+		case <-museTalkReadyCh:
+			if *museTalkPrepareOK {
+				museTalkChan = make(chan museTalkWork, 50)
+				log.Printf("MuseTalk 就緒，啟動唇形動畫管線")
+			} else {
+				log.Printf("MuseTalk prepare-face 失敗，跳過唇形動畫")
+			}
+		case <-time.After(5 * time.Second):
+			log.Printf("MuseTalk prepare-face 超時（5秒），跳過唇形動畫")
+		case <-ctx.Done():
+			return
+		}
 	}
 
 	var pipelineWg sync.WaitGroup
@@ -1458,29 +1521,19 @@ func (h *WebSocketHandler) processStreamingPipeline(
 					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
 			} else {
-				// 強制用 CosyVoice 女聲（男聲品質差暫時停用）
-				// 不管 voiceGender 設什麼，一律用 female 產生語音
-				b64, ttsErr := callCosyVoiceStreamBase64(ctx, sent.text, "female")
+				// Edge TTS 為主要 TTS（穩定、清晰、免費）
+				// CosyVoice 語音品質不穩定，暫停使用
+				ttsEngine = "edge-tts"
+				b64, ttsErr := callEdgeTTSBase64(ctx, sent.text, voiceGender)
 				if ttsErr != nil || b64 == "" {
-					log.Printf("CosyVoice #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
-					u, e2 := callEdgeTTS(ctx, sent.text, "female")
-					if e2 != nil || u == "" {
-						log.Printf("Edge TTS #%d 也失敗: %v", sent.index, e2)
-						continue
-					}
-					ttsEngine = "edge-tts"
-					audioURL = u
-					safeWriteWSMessage(conn, &wsMu, WSMessage{
-						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-					})
-				} else {
-					audioB64 = b64
-					safeWriteWSMessage(conn, &wsMu, WSMessage{
-						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
-					})
+					log.Printf("Edge TTS #%d 失敗: %v", sent.index, ttsErr)
+					continue
 				}
+				audioB64 = b64
+				safeWriteWSMessage(conn, &wsMu, WSMessage{
+					Type: "tts_audio_chunk",
+					Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
+				})
 			}
 
 			// 送入 MuseTalk 佇列（Mode 3 用）
