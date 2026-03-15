@@ -836,6 +836,40 @@ func callCosyVoiceTTS(ctx context.Context, text, voiceGender string) (string, er
 	return gpuPublicURL() + "/outputs/" + filename, nil
 }
 
+// callCosyVoiceStreamBase64 呼叫 CosyVoice 串流 TTS，回傳 base64 WAV（不寫檔，零 I/O）
+// 統一用 base64 傳輸，客戶端不需額外下載，避免 1-2 秒外部網路延遲
+func callCosyVoiceStreamBase64(ctx context.Context, text, voiceGender string) (string, error) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"text":         text,
+		"voice_id":     "default",
+		"voice_gender": voiceGender,
+	})
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", gpuInternalURL()+"/api/v1/tts/stream-synthesize", bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("CosyVoice 串流失敗: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("CosyVoice 串流錯誤 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	pcmData, err := io.ReadAll(resp.Body)
+	if err != nil || len(pcmData) == 0 {
+		return "", fmt.Errorf("CosyVoice 串流讀取失敗: %v (len=%d)", err, len(pcmData))
+	}
+
+	// PCM → WAV → base64（記憶體內，不寫檔）
+	wavData := pcmToWAV(pcmData, 22050, 1, 16)
+	return base64.StdEncoding.EncodeToString(wavData), nil
+}
+
 // pcmToWAV 把 raw PCM bytes 轉成 WAV 格式
 func pcmToWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	dataLen := len(pcm)
@@ -1346,36 +1380,41 @@ func (h *WebSocketHandler) processStreamingPipeline(
 
 			var audioB64, audioURL string
 
+			ttsEngine := "cosyvoice"
 			if useCustomVoice {
 				u, ttsErr := callGPUTTS(sent.text, voiceID, voiceGender)
 				if ttsErr != nil || u == "" {
 					log.Printf("TTS #%d 失敗: %v", sent.index, ttsErr)
 					continue
 				}
+				ttsEngine = "custom"
 				audioURL = u
 				writeWSMessage(conn, WSMessage{
 					Type: "tts_audio_chunk",
-					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID},
+					Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 				})
 			} else {
-				b64, ttsErr := callMeloTTS(ctx, sent.text, voiceGender)
+				// 統一用 CosyVoice（支援性別切換、一致音色，避免混合 MeloTTS/CosyVoice 不同聲音）
+				// CosyVoice 回傳 base64 WAV，客戶端不需額外 HTTP 下載
+				b64, ttsErr := callCosyVoiceStreamBase64(ctx, sent.text, voiceGender)
 				if ttsErr != nil || b64 == "" {
-					log.Printf("MeloTTS #%d 失敗: %v，回退 CosyVoice", sent.index, ttsErr)
-					u, e2 := callCosyVoiceTTS(ctx, sent.text, voiceGender)
+					log.Printf("CosyVoice #%d 失敗: %v，回退 Edge TTS", sent.index, ttsErr)
+					u, e2 := callEdgeTTS(ctx, sent.text, voiceGender)
 					if e2 != nil || u == "" {
-						log.Printf("CosyVoice #%d 也失敗: %v", sent.index, e2)
+						log.Printf("Edge TTS #%d 也失敗: %v", sent.index, e2)
 						continue
 					}
+					ttsEngine = "edge-tts"
 					audioURL = u
 					writeWSMessage(conn, WSMessage{
 						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID},
+						Data: fiber.Map{"audio_url": u, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 					})
 				} else {
 					audioB64 = b64
 					writeWSMessage(conn, WSMessage{
 						Type: "tts_audio_chunk",
-						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID},
+						Data: fiber.Map{"audio_base64": b64, "index": sent.index, "session_id": sessionID, "text": sent.text, "tts_engine": ttsEngine},
 					})
 				}
 			}
@@ -1401,7 +1440,7 @@ func (h *WebSocketHandler) processStreamingPipeline(
 				var frames []string
 				var mtErr error
 				if work.audioB64 != "" {
-					frames, mtErr = callMuseTalkLipsyncFromBase64(museTalkFaceID, work.audioB64, 44100)
+					frames, mtErr = callMuseTalkLipsyncFromBase64(museTalkFaceID, work.audioB64, 22050)
 				} else if work.audioURL != "" {
 					frames, mtErr = callMuseTalkLipsync(museTalkFaceID, work.audioURL)
 				}

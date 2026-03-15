@@ -1,5 +1,5 @@
 //! WebSocket 客戶端 — 連接雲端 Gateway
-//! 支援串流音訊 chunk 接收 + 打斷機制
+//! 支援串流音訊 chunk 接收 + 打斷機制 + 唇形幀直接轉發
 
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +38,12 @@ fn get_sender() -> &'static WsSender {
     WS_SENDER.get_or_init(|| Arc::new(Mutex::new(None)))
 }
 
+/// TTS 工作項目（用 channel 保證順序）
+enum TtsWork {
+    Base64 { data: String, index: i64, text: String, engine: String },
+    Url { url: String, index: i64, text: String, engine: String },
+}
+
 /// 建立 WebSocket 連線
 pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(), String> {
     let (ws_stream, _) = connect_async(url)
@@ -53,13 +59,61 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
     }
     CONNECTED.store(true, Ordering::SeqCst);
 
+    // TTS 串流佇列 — channel 保證音訊按順序處理（不再 spawn 獨立 task）
+    let (tts_tx, mut tts_rx) = tokio::sync::mpsc::channel::<TtsWork>(50);
+
+    // TTS 消費者（循序處理，避免 base64 和 URL 交錯導致亂序）
+    let app_tts = app.clone();
+    tokio::spawn(async move {
+        while let Some(work) = tts_rx.recv().await {
+            match work {
+                TtsWork::Base64 { data, index, text, engine } => {
+                    let start = std::time::Instant::now();
+                    match decode_and_enqueue(&data) {
+                        Ok(_) => {
+                            use tauri::Emitter;
+                            app_tts.emit("debug-log", &format!(
+                                "TTS #{} [{}]「{}」入隊 ({}ms, {}KB)",
+                                index, engine, text, start.elapsed().as_millis(), data.len() / 1024
+                            )).ok();
+                        }
+                        Err(e) => {
+                            use tauri::Emitter;
+                            app_tts.emit("debug-log", &format!(
+                                "TTS #{} [{}]「{}」入隊失敗: {}", index, engine, text, e
+                            )).ok();
+                        }
+                    }
+                }
+                TtsWork::Url { url, index, text, engine } => {
+                    let start = std::time::Instant::now();
+                    match download_and_enqueue(&url).await {
+                        Ok(_) => {
+                            use tauri::Emitter;
+                            app_tts.emit("debug-log", &format!(
+                                "TTS #{} [{}]「{}」URL 下載+入隊 ({}ms)",
+                                index, engine, text, start.elapsed().as_millis()
+                            )).ok();
+                        }
+                        Err(e) => {
+                            use tauri::Emitter;
+                            app_tts.emit("debug-log", &format!(
+                                "TTS #{} [{}]「{}」URL 入隊失敗: {}", index, engine, text, e
+                            )).ok();
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // 在背景接收訊息
     let app_clone = app.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // 嘗試解析 JSON 看是否為 tts_audio_chunk（在 Rust 層直接處理）
+                    // 嘗試解析 JSON（在 Rust 層直接處理音訊和唇形）
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                         let msg_type = json["type"].as_str().unwrap_or("");
 
@@ -76,55 +130,41 @@ pub async fn connect(app: tauri::AppHandle, url: &str, _mode: i32) -> Result<(),
                             }
                             "tts_audio_chunk" | "tts_audio" => {
                                 let chunk_idx = json["data"]["index"].as_i64().unwrap_or(-1);
-                                // 串流 TTS chunk：支援 base64（記憶體內）或 URL（下載）
+                                let chunk_text = json["data"]["text"].as_str().unwrap_or("").to_string();
+                                let tts_engine = json["data"]["tts_engine"].as_str().unwrap_or("").to_string();
+
+                                // 送入 TTS 佇列（循序處理，保證順序）
                                 if let Some(b64) = json["data"]["audio_base64"].as_str() {
-                                    // base64 模式：直接解碼，不需下載（省 ~250ms）
-                                    let b64 = b64.to_string();
-                                    let app_dbg = app_clone.clone();
-                                    let idx = chunk_idx;
-                                    tokio::spawn(async move {
-                                        let start = std::time::Instant::now();
-                                        match decode_and_enqueue(&b64) {
-                                            Ok(_) => {
-                                                use tauri::Emitter;
-                                                app_dbg.emit("debug-log", &format!(
-                                                    "TTS #{} base64 入隊 ({}ms, {}KB)",
-                                                    idx, start.elapsed().as_millis(), b64.len() / 1024
-                                                )).ok();
-                                            }
-                                            Err(e) => {
-                                                use tauri::Emitter;
-                                                app_dbg.emit("debug-log", &format!("TTS #{} base64 入隊失敗: {}", idx, e)).ok();
-                                            }
-                                        }
-                                    });
+                                    let _ = tts_tx.send(TtsWork::Base64 {
+                                        data: b64.to_string(),
+                                        index: chunk_idx,
+                                        text: chunk_text.clone(),
+                                        engine: tts_engine.clone(),
+                                    }).await;
                                 } else if let Some(audio_url) = json["data"]["audio_url"].as_str() {
-                                    let url = audio_url.to_string();
-                                    let app_dbg = app_clone.clone();
-                                    let idx = chunk_idx;
-                                    tokio::spawn(async move {
-                                        let start = std::time::Instant::now();
-                                        match download_and_enqueue(&url).await {
-                                            Ok(_) => {
-                                                use tauri::Emitter;
-                                                app_dbg.emit("debug-log", &format!(
-                                                    "TTS #{} URL 下載+入隊 ({}ms)",
-                                                    idx, start.elapsed().as_millis()
-                                                )).ok();
-                                            }
-                                            Err(e) => {
-                                                use tauri::Emitter;
-                                                app_dbg.emit("debug-log", &format!("TTS #{} URL 入隊失敗: {}", idx, e)).ok();
-                                            }
-                                        }
-                                    });
+                                    let _ = tts_tx.send(TtsWork::Url {
+                                        url: audio_url.to_string(),
+                                        index: chunk_idx,
+                                        text: chunk_text.clone(),
+                                        engine: tts_engine.clone(),
+                                    }).await;
                                 }
                                 // 同時也發送給前端（讓 UI 顯示進度）
                                 use tauri::Emitter;
                                 app_clone.emit("ws-message", text.as_str()).ok();
                             }
+                            "avatar_frame" => {
+                                // MuseTalk 唇形幀 — 直接發送到 AvatarWindow（不經 React 繞路）
+                                if let Some(frame) = json["data"]["frame"].as_str() {
+                                    use tauri::Emitter;
+                                    app_clone.emit("avatar-frame-update", frame).ok();
+                                }
+                                // 也發送給主視窗（UI 顯示進度）
+                                use tauri::Emitter;
+                                app_clone.emit("ws-message", text.as_str()).ok();
+                            }
                             "tts_stream_end" => {
-                                // 串流結束信號（可選：前端更新 UI）
+                                // 串流結束信號
                                 use tauri::Emitter;
                                 app_clone.emit("ws-message", text.as_str()).ok();
                             }
